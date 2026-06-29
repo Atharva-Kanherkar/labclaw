@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -13,7 +15,7 @@ from labclaw.clustering import ClusterStore
 from labclaw.eval_harness import ExperimentSpec, default_registry
 from labclaw.evidence_critic import EvidenceCritic, EvidenceInput, ReproducibilityContext
 from labclaw.ledger import DEFAULT_MISSION
-from labclaw.multimodal_reader import parse_local_fixture, read_source, to_dict as reader_to_dict
+from labclaw.multimodal_reader import MODEL, parse_local_fixture, read_source, to_dict as reader_to_dict
 from labclaw.report import LabReport, build_report
 from labclaw.sources import (
     ARXIV_API,
@@ -53,6 +55,15 @@ def demo_capabilities() -> dict[str, bool]:
         "live_e2b": live_e2b_enabled(),
         "gemini_pi": bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")),
     }
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def key_suffix(env_name: str) -> str:
+    value = os.environ.get(env_name, "")
+    return f"…{value[-4:]}" if len(value) >= 4 else ("set" if value else "missing")
 
 
 @dataclass
@@ -107,10 +118,22 @@ class LabPipeline:
 
     def run(self, *, mission: str = DEFAULT_MISSION) -> PipelineResult:
         run_id = f"run-{uuid4().hex[:8]}"
+        started_at = utc_now()
         stages: list[StageSnapshot] = []
 
         sources, scout_summary = self._stage_scout()
-        stages.append(StageSnapshot("scout", "succeeded", scout_summary, {"count": len(sources)}))
+        stages.append(
+            StageSnapshot(
+                "scout",
+                "succeeded",
+                scout_summary,
+                {
+                    "count": len(sources),
+                    "mode": "fixture_recordings",
+                    "sources": [source.to_dict() for source in sources],
+                },
+            )
+        )
 
         source = self._pick_source(sources)
         cluster_store = ClusterStore(self.data_dir / "clusters.json")
@@ -126,25 +149,20 @@ class LabPipeline:
             )
         )
 
-        reader_result, read_summary = self._stage_read(source)
+        reader_result, read_summary, read_proof = self._stage_read(source)
         claim = self._pick_claim(reader_result)
-        stages.append(
-            StageSnapshot(
-                "read",
-                "succeeded",
-                read_summary,
-                reader_to_dict(reader_result),
-            )
-        )
+        read_payload = reader_to_dict(reader_result)
+        read_payload["proof"] = read_proof
+        stages.append(StageSnapshot("read", "succeeded", read_summary, read_payload))
 
         spec = self._build_experiment_spec(claim, assignment.cluster_id, source)
-        metric, experiment_summary = self._stage_experiment(spec)
+        metric, experiment_summary, experiment_proof = self._stage_experiment(spec)
         stages.append(
             StageSnapshot(
                 "experiment",
                 "succeeded" if metric.status != "failed" else "failed",
                 experiment_summary,
-                {"spec": spec.to_dict()},
+                {"spec": spec.to_dict(), "proof": experiment_proof},
             )
         )
         stages.append(
@@ -204,6 +222,20 @@ class LabPipeline:
         )
         payload = result.to_dict()
         payload["capabilities"] = demo_capabilities()
+        payload["demo_proof"] = {
+            "started_at": started_at,
+            "finished_at": utc_now(),
+            "live_cerebras_used": read_proof.get("mode") == "live_cerebras",
+            "reader_proof": read_proof,
+            "experiment_proof": experiment_proof,
+            "selected_source_id": source.source_id,
+            "transparency": {
+                "scout": "Recorded arXiv/GitHub fixtures (offline, deterministic)",
+                "reader": read_proof.get("label", "unknown"),
+                "experiment": experiment_proof.get("label", "unknown"),
+                "eval": "Evidence critic gates reportable output",
+            },
+        }
         self._persist_payload(result.run_id, payload)
         return result
 
@@ -267,35 +299,84 @@ class LabPipeline:
                 return record
         return sources[0]
 
-    def _stage_read(self, source: SourceRecord) -> tuple[Any, str]:
+    def _stage_read(self, source: SourceRecord) -> tuple[Any, str, dict[str, Any]]:
+        started = time.perf_counter()
         if live_reader_enabled():
             try:
                 reader_result = read_source(SAMPLE_SOURCE, use_gemma=True)
-                return reader_result, f"Live Gemma/Cerebras reader · {len(reader_result.cards)} claim card(s)"
+                duration_ms = round((time.perf_counter() - started) * 1000)
+                proof = {
+                    "mode": "live_cerebras",
+                    "label": f"LIVE Cerebras {MODEL} inference",
+                    "provider": "cerebras",
+                    "model": MODEL,
+                    "duration_ms": duration_ms,
+                    "source_file": SAMPLE_SOURCE.name,
+                    "api_key_suffix": key_suffix("CEREBRAS_API_KEY"),
+                    "strict_json_schema": True,
+                    "cards_extracted": len(reader_result.cards),
+                }
+                summary = (
+                    f"LIVE Cerebras · {MODEL} · {duration_ms}ms · "
+                    f"{len(reader_result.cards)} claim card(s)"
+                )
+                return reader_result, summary, proof
             except Exception as exc:
                 reader_result = parse_local_fixture(
                     self._reader_content(source),
                     source_path=SAMPLE_SOURCE,
                 )
-                return reader_result, f"Fixture reader fallback ({exc})"
+                proof = {
+                    "mode": "fixture_fallback",
+                    "label": "Fixture parser fallback after Cerebras error",
+                    "error": str(exc),
+                    "duration_ms": round((time.perf_counter() - started) * 1000),
+                }
+                return reader_result, f"Fixture fallback ({exc})", proof
 
         reader_result = parse_local_fixture(
             self._reader_content(source),
             source_path=SAMPLE_SOURCE if self.fixture_mode else None,
         )
-        return reader_result, f"Fixture reader · {len(reader_result.cards)} claim card(s)"
+        proof = {
+            "mode": "fixture",
+            "label": "Offline fixture parser (no CEREBRAS_API_KEY)",
+            "duration_ms": round((time.perf_counter() - started) * 1000),
+        }
+        return reader_result, f"Fixture reader · {len(reader_result.cards)} claim card(s)", proof
 
-    def _stage_experiment(self, spec: ExperimentSpec):
+    def _stage_experiment(self, spec: ExperimentSpec) -> tuple[Any, str, dict[str, Any]]:
         if live_e2b_enabled():
             try:
                 metric = self._run_live_e2b(spec)
-                return metric, f"Live E2B sandbox ({metric.status})"
+                proof = {
+                    "mode": "live_e2b",
+                    "label": "Live E2B sandbox execution",
+                    "baseline_command": spec.baseline_command,
+                    "candidate_command": spec.candidate_command,
+                    "api_key_suffix": key_suffix("E2B_API_KEY"),
+                }
+                return metric, f"Live E2B sandbox ({metric.status})", proof
             except Exception as exc:
                 metric = default_registry().run(spec)
-                return metric, f"Fixture harness fallback after E2B error ({exc})"
+                proof = {
+                    "mode": "fixture_fallback",
+                    "label": "Deterministic harness after E2B error",
+                    "error": str(exc),
+                    "baseline_command": spec.baseline_command,
+                    "candidate_command": spec.candidate_command,
+                }
+                return metric, f"Harness fallback ({exc})", proof
 
         metric = default_registry().run(spec)
-        return metric, f"Fixture harness ({metric.status})"
+        proof = {
+            "mode": "fixture_harness",
+            "label": "Deterministic metric harness (baseline 42 → candidate 55 tok/s)",
+            "baseline_command": spec.baseline_command,
+            "candidate_command": spec.candidate_command,
+            "harness": spec.harness,
+        }
+        return metric, f"Harness · {metric.status}", proof
 
     def _run_live_e2b(self, spec: ExperimentSpec):
         from labclaw.e2b_runner import (
