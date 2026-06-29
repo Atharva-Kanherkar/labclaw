@@ -110,3 +110,31 @@ labclaw daemon --once --resume RUN_ID --ledger /tmp/labclaw-ledger.jsonl
 
 For editable checkouts without installed console scripts, use
 `python -m labclaw.daemon daemon ...` with the same flags.
+
+## Gemini PI orchestrator
+
+Issue #13 adds the strategic PI layer. It turns mission/context into a structured
+decision: search plan, cluster priorities, experiment proposal, notification
+decision, and interpretation.
+
+Tests use an injected fake client, so no Gemini credentials are required:
+
+```python
+from labclaw.gemini_pi import GeminiPI
+
+pi = GeminiPI(fake_client)
+decision = pi.decide(
+    mission="Find cheap, measurable ML/code improvements.",
+    cluster_memory=[],
+    source_summaries=[],
+    claim_cards=[],
+    experiment_results=[],
+)
+```
+
+For live Gemini use, install the optional extra and set a key:
+
+```bash
+pip install "labclaw[gemini]"
+export GEMINI_API_KEY=...
+```
