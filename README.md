@@ -156,3 +156,33 @@ For live Gemini use, install the optional extra and set a key:
 pip install "labclaw[gemini]"
 export GEMINI_API_KEY=...
 ```
+
+## Eval harness registry
+
+Issue #18 defines the local truth contract for "improved." The Gemini PI proposal
+becomes an `ExperimentSpec` with claim/cluster provenance, baseline and
+candidate commands, metric, direction, threshold, and harness name. A harness
+returns normalized metric JSON with baseline, candidate, delta, status, artifacts,
+and failure reason.
+Thresholds can be absolute deltas like `delta>=5` or PI-style ratios like
+`candidate >= baseline * 1.10`; `<=` ratio thresholds infer lower-is-better.
+The bundled `tiny_metric` harness is fixture-only: it parses commands shaped like
+`metric:NAME=VALUE` and validates `NAME` against the spec metric. Real command
+execution belongs to the E2B runner in #17.
+
+```python
+from labclaw.eval_harness import default_registry, spec_from_pi_proposal
+
+spec = spec_from_pi_proposal({
+    "claim_id": "claim-cache-aware",
+    "cluster_id": "cluster-speed",
+    "should_run": True,
+    "goal": "Compare throughput.",
+    "baseline_command": "metric:tokens_per_second=42",
+    "candidate_command": "metric:tokens_per_second=55",
+    "metric": "tokens_per_second",
+    "threshold": "delta>=5",
+    "rationale": "Bounded speed claim with explicit commands.",
+})
+result = default_registry().run(spec)
+```
