@@ -7,7 +7,7 @@ COPY labclaw ./labclaw
 COPY samples ./samples
 COPY tests/fixtures ./tests/fixtures
 
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir ".[e2b]"
 
 ENV LABCLAW_DATA_DIR=/data
 ENV LABCLAW_FIXTURE_MODE=1

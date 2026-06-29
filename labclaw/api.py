@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from labclaw.ledger import DEFAULT_MISSION
-from labclaw.pipeline import LabPipeline
+from labclaw.pipeline import LabPipeline, demo_capabilities
 
 DATA_DIR = Path(os.environ.get("LABCLAW_DATA_DIR", "labclaw_data"))
 FIXTURE_MODE = os.environ.get("LABCLAW_FIXTURE_MODE", "1") not in {"0", "false", "False"}
@@ -27,14 +27,20 @@ pipeline = LabPipeline(DATA_DIR, fixture_mode=FIXTURE_MODE)
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok", "fixture_mode": str(FIXTURE_MODE).lower()}
+def health() -> dict[str, str | dict[str, bool]]:
+    return {
+        "status": "ok",
+        "fixture_mode": str(FIXTURE_MODE).lower(),
+        "capabilities": demo_capabilities(),
+    }
 
 
 @app.post("/api/demo/run")
 def run_demo() -> dict:
     result = pipeline.run(mission=DEFAULT_MISSION)
-    return result.to_dict()
+    payload = result.to_dict()
+    payload["capabilities"] = demo_capabilities()
+    return payload
 
 
 @app.get("/api/demo/latest")

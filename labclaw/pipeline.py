@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -12,7 +13,7 @@ from labclaw.clustering import ClusterStore
 from labclaw.eval_harness import ExperimentSpec, default_registry
 from labclaw.evidence_critic import EvidenceCritic, EvidenceInput, ReproducibilityContext
 from labclaw.ledger import DEFAULT_MISSION
-from labclaw.multimodal_reader import parse_local_fixture, to_dict as reader_to_dict
+from labclaw.multimodal_reader import parse_local_fixture, read_source, to_dict as reader_to_dict
 from labclaw.report import LabReport, build_report
 from labclaw.sources import (
     ARXIV_API,
@@ -27,6 +28,31 @@ from labclaw.sources import (
 
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
 SAMPLE_SOURCE = Path(__file__).resolve().parent.parent / "samples" / "tiny-ml-claim.md"
+
+
+def live_reader_enabled() -> bool:
+    return bool(os.environ.get("CEREBRAS_API_KEY")) and os.environ.get("LABCLAW_LIVE_READER", "1") not in {
+        "0",
+        "false",
+        "False",
+    }
+
+
+def live_e2b_enabled() -> bool:
+    return bool(os.environ.get("E2B_API_KEY")) and os.environ.get("LABCLAW_LIVE_E2B", "0") not in {
+        "0",
+        "false",
+        "False",
+    }
+
+
+def demo_capabilities() -> dict[str, bool]:
+    return {
+        "fixture_scouts": True,
+        "live_reader": live_reader_enabled(),
+        "live_e2b": live_e2b_enabled(),
+        "gemini_pi": bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")),
+    }
 
 
 @dataclass
@@ -100,27 +126,24 @@ class LabPipeline:
             )
         )
 
-        reader_result = parse_local_fixture(
-            self._reader_content(source),
-            source_path=SAMPLE_SOURCE if self.fixture_mode else None,
-        )
+        reader_result, read_summary = self._stage_read(source)
         claim = self._pick_claim(reader_result)
         stages.append(
             StageSnapshot(
                 "read",
                 "succeeded",
-                f"Extracted {len(reader_result.cards)} claim card(s)",
+                read_summary,
                 reader_to_dict(reader_result),
             )
         )
 
         spec = self._build_experiment_spec(claim, assignment.cluster_id, source)
-        metric = default_registry().run(spec)
+        metric, experiment_summary = self._stage_experiment(spec)
         stages.append(
             StageSnapshot(
                 "experiment",
                 "succeeded" if metric.status != "failed" else "failed",
-                f"Ran tiny_metric harness ({metric.status})",
+                experiment_summary,
                 {"spec": spec.to_dict()},
             )
         )
@@ -179,7 +202,9 @@ class LabPipeline:
             report=report.to_dict(),
             reportable=verdict.reportable,
         )
-        self._persist(result)
+        payload = result.to_dict()
+        payload["capabilities"] = demo_capabilities()
+        self._persist_payload(result.run_id, payload)
         return result
 
     def latest(self) -> dict[str, Any] | None:
@@ -189,8 +214,13 @@ class LabPipeline:
         return json.loads(runs[0].read_text(encoding="utf-8"))
 
     def _persist(self, result: PipelineResult) -> None:
-        path = self.runs_dir / f"{result.run_id}.json"
-        path.write_text(json.dumps(result.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
+        payload = result.to_dict()
+        payload["capabilities"] = demo_capabilities()
+        self._persist_payload(result.run_id, payload)
+
+    def _persist_payload(self, run_id: str, payload: dict[str, Any]) -> None:
+        path = self.runs_dir / f"{run_id}.json"
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
     def _stage_scout(self) -> tuple[list[SourceRecord], str]:
         seen = SeenStore(self.data_dir / "seen.json")
@@ -237,6 +267,69 @@ class LabPipeline:
                 return record
         return sources[0]
 
+    def _stage_read(self, source: SourceRecord) -> tuple[Any, str]:
+        if live_reader_enabled():
+            try:
+                reader_result = read_source(SAMPLE_SOURCE, use_gemma=True)
+                return reader_result, f"Live Gemma/Cerebras reader · {len(reader_result.cards)} claim card(s)"
+            except Exception as exc:
+                reader_result = parse_local_fixture(
+                    self._reader_content(source),
+                    source_path=SAMPLE_SOURCE,
+                )
+                return reader_result, f"Fixture reader fallback ({exc})"
+
+        reader_result = parse_local_fixture(
+            self._reader_content(source),
+            source_path=SAMPLE_SOURCE if self.fixture_mode else None,
+        )
+        return reader_result, f"Fixture reader · {len(reader_result.cards)} claim card(s)"
+
+    def _stage_experiment(self, spec: ExperimentSpec):
+        if live_e2b_enabled():
+            try:
+                metric = self._run_live_e2b(spec)
+                return metric, f"Live E2B sandbox ({metric.status})"
+            except Exception as exc:
+                metric = default_registry().run(spec)
+                return metric, f"Fixture harness fallback after E2B error ({exc})"
+
+        metric = default_registry().run(spec)
+        return metric, f"Fixture harness ({metric.status})"
+
+    def _run_live_e2b(self, spec: ExperimentSpec):
+        from labclaw.e2b_runner import (
+            DEFAULT_E2B_TEMPLATE,
+            E2BExperimentRunner,
+            E2BRunRequest,
+            E2BSandboxFactory,
+            ExperimentFile,
+        )
+
+        runner = E2BExperimentRunner(
+            E2BSandboxFactory(),
+            artifact_root=self.data_dir / "e2b-artifacts",
+        )
+        request = E2BRunRequest(
+            spec=spec,
+            files=[
+                ExperimentFile(
+                    path="/workspace/bench.py",
+                    content=(
+                        "import json, sys\n"
+                        "value = 42 if sys.argv[1] == 'baseline' else 55\n"
+                        "print(json.dumps({'metrics': {'tokens_per_second': value}}))\n"
+                    ),
+                )
+            ],
+            template=os.environ.get("E2B_TEMPLATE", DEFAULT_E2B_TEMPLATE),
+            timeout_seconds=90,
+        )
+        result = runner.run(request)
+        if result.metric_result is None:
+            raise RuntimeError(result.failure_reason or "E2B run produced no metrics")
+        return result.metric_result
+
     def _reader_content(self, source: SourceRecord) -> str:
         if source.source_id.startswith("sample:") or self.fixture_mode:
             return SAMPLE_SOURCE.read_text(encoding="utf-8")
@@ -251,12 +344,20 @@ class LabPipeline:
         raise ValueError("Reader produced no claim cards.")
 
     def _build_experiment_spec(self, claim, cluster_id: str, source: SourceRecord) -> ExperimentSpec:
+        if live_e2b_enabled():
+            baseline_command = "python /workspace/bench.py baseline"
+            candidate_command = "python /workspace/bench.py candidate"
+            harness = "e2b"
+        else:
+            baseline_command = "metric:tokens_per_second=42"
+            candidate_command = "metric:tokens_per_second=55"
+            harness = "tiny_metric"
         return ExperimentSpec(
             claim_id=str(getattr(claim, "id", "claim-1")),
             cluster_id=cluster_id,
-            harness="tiny_metric",
-            baseline_command="metric:tokens_per_second=42",
-            candidate_command="metric:tokens_per_second=55",
+            harness=harness,
+            baseline_command=baseline_command,
+            candidate_command=candidate_command,
             metric="tokens_per_second",
             direction="higher_is_better",
             threshold=5.0,
