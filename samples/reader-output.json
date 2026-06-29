@@ -1,0 +1,41 @@
+{
+  "source": {
+    "title": "Tiny Optimizer Claim",
+    "path": "samples/tiny-ml-claim.md"
+  },
+  "cards": [
+    {
+      "id": "claim-1",
+      "main_claim": "Cache-aware batching improves toy training throughput by 1.3x while matching the baseline validation curve.",
+      "figures": [
+        {
+          "id": "fig-1",
+          "alt_text": "Loss curve comparing baseline and cache-aware batching",
+          "path": "figures/tiny-optimizer-loss.png",
+          "caption": "The proposed method reaches the same final loss after 180 seconds.",
+          "visual_observation": "The cache-aware curve converges with the baseline curve."
+        }
+      ],
+      "benchmark_numbers": ["baseline: 42 tok/s", "optimized runner: 55 tok/s"],
+      "code_hooks": [
+        "git clone https://github.com/example/tiny-optimizer",
+        "python bench.py --mode baseline",
+        "python bench.py --mode cache-aware"
+      ],
+      "is_testable": true,
+      "evidence_needed": [
+        "Verify throughput increase from 42 to 55 tok/s",
+        "Verify final validation loss matches baseline"
+      ]
+    },
+    {
+      "id": "claim-2",
+      "main_claim": "The method is elegant and easy to use.",
+      "figures": [],
+      "benchmark_numbers": [],
+      "code_hooks": [],
+      "is_testable": false,
+      "evidence_needed": []
+    }
+  ]
+}

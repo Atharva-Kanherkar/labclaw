@@ -41,3 +41,9 @@ Run tests:
 ```bash
 python -m pytest
 ```
+
+Pick one claim for reproduction:
+
+```bash
+python -m labclaw.claim_picker samples/reader-output.json --json
+```
