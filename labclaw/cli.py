@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from labclaw.clustering import ClusterStore
+from labclaw.daemon import main as daemon_main
 from labclaw.figures import FigureStore
 from labclaw.sources import (
     ArxivScout,
@@ -49,6 +50,11 @@ def _scout(args) -> int:
     return 0
 
 
+def _daemon(args) -> int:
+    daemon_main(getattr(args, "daemon_args", []))
+    return 0
+
+
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(prog="labclaw", description="LabClaw CLI.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -58,6 +64,10 @@ def main(argv=None) -> None:
     p_scout.add_argument("--max", type=int, default=25, help="Max results per scout.")
     p_scout.add_argument("--data-dir", default="labclaw_data", help="Where to store state.")
     p_scout.set_defaults(func=_scout)
+
+    p_daemon = sub.add_parser("daemon", help="Run the heartbeat daemon.")
+    p_daemon.add_argument("daemon_args", nargs=argparse.REMAINDER, help="Daemon flags such as --once")
+    p_daemon.set_defaults(func=_daemon)
 
     args = parser.parse_args(argv)
     try:

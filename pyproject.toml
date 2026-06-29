@@ -3,10 +3,14 @@ name = "labclaw"
 version = "0.1.0"
 description = "Always-on AI scientist that fact-checks ML/code claims with multimodal evidence and VM experiments."
 requires-python = ">=3.9"
-dependencies = ["cerebras-cloud-sdk>=1.50.0"]
+dependencies = [
+    "cerebras-cloud-sdk>=1.50.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "Pillow>=10.0"]
+dev = ["pytest>=8.0", "Pillow>=10.0", "httpx>=0.28.0"]
 gemini = ["google-genai>=1.0.0"]
 e2b = ["e2b>=1.0.0"]
 figures = ["Pillow>=10.0"]
@@ -15,7 +19,11 @@ figures = ["Pillow>=10.0"]
 labclaw-read = "labclaw.multimodal_reader:main"
 labclaw-speed-demo = "labclaw.speed_demo:main"
 labclaw-bot = "labclaw.telegram:main"
-labclaw = "labclaw.daemon:main"
+labclaw-api = "labclaw.api:main"
+labclaw = "labclaw.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+include = ["labclaw*"]
