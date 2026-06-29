@@ -9,25 +9,31 @@ import {
   type PipelineRun,
 } from "@/lib/api";
 
-const LIVE_STEPS = [
-  "Loading recorded arXiv + GitHub scouts…",
-  "Clustering source into topic memory…",
-  "Calling Cerebras Gemma reader on sample paper…",
-  "Running baseline vs candidate experiment…",
-  "Scoring metrics + evidence critic…",
-  "Building report…",
-];
+function liveSteps(caps: DemoCapabilities | null) {
+  return [
+    caps?.live_scouts ? "Fetching live arXiv + GitHub scouts…" : "Loading offline scout fixtures…",
+    "Clustering source into topic memory…",
+    caps?.live_reader ? "Calling Cerebras on scouted source text…" : "Parsing scouted source locally…",
+    caps?.live_e2b ? "Running measured baseline vs candidate in E2B…" : "Running local metric harness…",
+    "Scoring metrics + evidence critic…",
+    "Building report…",
+  ];
+}
 
 export default function DemoDashboard() {
   const [run, setRun] = useState<PipelineRun | null>(null);
   const [caps, setCaps] = useState<DemoCapabilities | null>(null);
+  const [fixtureMode, setFixtureMode] = useState(false);
   const [loading, setLoading] = useState(false);
   const [liveStep, setLiveStep] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     fetchHealth()
-      .then((health) => setCaps(health.capabilities))
+      .then((health) => {
+        setCaps(health.capabilities);
+        setFixtureMode(health.fixture_mode === "true");
+      })
       .catch(() => setCaps(null));
     fetchLatest()
       .then(setRun)
@@ -36,11 +42,12 @@ export default function DemoDashboard() {
 
   useEffect(() => {
     if (!loading) return;
+    const steps = liveSteps(caps);
     const timer = setInterval(() => {
-      setLiveStep((step) => (step + 1) % LIVE_STEPS.length);
+      setLiveStep((step) => (step + 1) % steps.length);
     }, 1400);
     return () => clearInterval(timer);
-  }, [loading]);
+  }, [loading, caps]);
 
   async function handleRun() {
     setLoading(true);
@@ -58,12 +65,21 @@ export default function DemoDashboard() {
   }
 
   const readStage = run?.stages.find((stage) => stage.stage === "read");
-  const scoutSources = run?.stages.find((stage) => stage.stage === "scout")?.payload?.sources ?? [];
-  const readProof = readStage?.payload?.proof;
-  const experimentProof = run?.stages.find((stage) => stage.stage === "experiment")?.payload?.proof;
+  const scoutStage = run?.stages.find((stage) => stage.stage === "scout");
+  const scoutSources = scoutStage?.payload?.sources ?? [];
+  const readProof = readStage?.payload?.proof ?? run?.demo_proof?.reader_proof;
+  const scoutProof = scoutStage?.payload?.proof ?? run?.demo_proof?.scout_proof;
+  const experimentProof =
+    run?.stages.find((stage) => stage.stage === "experiment")?.payload?.proof ??
+    run?.demo_proof?.experiment_proof;
   const markdown =
     run?.stages.find((stage) => stage.stage === "report")?.payload?.markdown ?? "";
-  const liveUsed = run?.demo_proof?.live_cerebras_used ?? readProof?.mode === "live_cerebras";
+
+  const liveScouts = run?.demo_proof?.live_scouts_used ?? scoutProof?.mode === "live_network";
+  const liveReader = run?.demo_proof?.live_cerebras_used ?? readProof?.mode === "live_cerebras";
+  const liveE2b = run?.demo_proof?.live_e2b_used ?? experimentProof?.mode === "live_e2b";
+  const fullyLive = liveScouts && liveReader && liveE2b;
+  const activitySteps = liveSteps(caps);
 
   return (
     <div className="demo-page">
@@ -74,12 +90,22 @@ export default function DemoDashboard() {
           source → cluster → claim → experiment → verdict
         </p>
 
-        <div className={`proof-banner mt-6 ${liveUsed ? "proof-banner-live" : ""}`}>
-          <strong>{liveUsed ? "LIVE CEREBRAS READER ACTIVE" : "FIXTURE DEMO MODE"}</strong>
+        <div className={`proof-banner mt-6 ${fullyLive ? "proof-banner-live" : ""}`}>
+          <strong>
+            {fullyLive
+              ? "LIVE DEMO — network scouts · Cerebras · E2B"
+              : fixtureMode
+                ? "PARTIAL LIVE — fixture scouts enabled on API"
+                : "MIXED MODE — see proof chips below"}
+          </strong>
           <span>
             {caps?.live_reader
-              ? "CEREBRAS_API_KEY detected · gemma-4-31b will run on heartbeat"
-              : "Set CEREBRAS_API_KEY on Railway to enable live reader"}
+              ? "Cerebras reader available"
+              : "Set CEREBRAS_API_KEY on Railway"}
+            {" · "}
+            {caps?.live_e2b ? "E2B sandbox available" : "Set E2B_API_KEY + LABCLAW_LIVE_E2B=1"}
+            {" · "}
+            {caps?.live_scouts ? "live scouts default" : "LABCLAW_FIXTURE_MODE=1 forces offline scouts"}
           </span>
         </div>
 
@@ -92,19 +118,27 @@ export default function DemoDashboard() {
           >
             {loading ? "Running heartbeat…" : "Run demo heartbeat"}
           </button>
+          {caps?.live_scouts ? (
+            <span className="chip chip-good">live scouts</span>
+          ) : (
+            <span className="chip chip-bad">fixture scouts</span>
+          )}
           {caps?.live_reader ? (
             <span className="chip chip-good">Cerebras key loaded</span>
           ) : (
             <span className="chip chip-bad">no Cerebras key</span>
           )}
-          <span className="chip chip-muted">scouts: fixtures</span>
-          <span className="chip chip-muted">eval: harness</span>
+          {caps?.live_e2b ? (
+            <span className="chip chip-good">E2B live</span>
+          ) : (
+            <span className="chip chip-muted">E2B off / harness</span>
+          )}
         </div>
 
         {loading ? (
           <div className="activity-log mt-4">
             <p className="activity-log-title">Live activity</p>
-            <p className="activity-log-line">{LIVE_STEPS[liveStep]}</p>
+            <p className="activity-log-line">{activitySteps[liveStep]}</p>
             <div className="activity-bar">
               <span className="activity-bar-fill" />
             </div>
@@ -119,22 +153,33 @@ export default function DemoDashboard() {
             <p className="demo-kicker">Run proof</p>
             <h2 className="detail-title">{run.run_id}</h2>
             <div className="chip-row">
-              {run.demo_proof?.live_cerebras_used ? (
+              {liveScouts ? (
+                <span className="chip chip-good">live scouts verified</span>
+              ) : (
+                <span className="chip chip-bad">offline scout fixtures</span>
+              )}
+              {liveReader ? (
                 <span className="chip chip-good">live cerebras verified</span>
               ) : (
                 <span className="chip chip-bad">fixture reader used</span>
               )}
+              {liveE2b ? (
+                <span className="chip chip-good">live E2B measured</span>
+              ) : (
+                <span className="chip chip-muted">local harness / E2B fallback</span>
+              )}
               <span className="chip">started {run.demo_proof?.started_at ?? "—"}</span>
             </div>
             <ul className="transparency-list">
-              <li>{run.demo_proof?.transparency?.scout}</li>
-              <li>{run.demo_proof?.transparency?.reader}</li>
-              <li>{run.demo_proof?.transparency?.experiment}</li>
+              <li>{run.demo_proof?.transparency?.scout ?? scoutProof?.label}</li>
+              <li>{run.demo_proof?.transparency?.reader ?? readProof?.label}</li>
+              <li>{run.demo_proof?.transparency?.experiment ?? experimentProof?.label}</li>
             </ul>
           </section>
 
           <section className="detail-card rise" style={{ animationDelay: "0.12s" }}>
             <p className="demo-kicker">Scout inbox</p>
+            <p className="hero-sub">{scoutStage?.summary}</p>
             <div className="source-table-wrap">
               <table className="source-table">
                 <thead>
@@ -168,6 +213,7 @@ export default function DemoDashboard() {
               <div className="proof-grid">
                 <div><span>mode</span><strong>{readProof.mode}</strong></div>
                 <div><span>model</span><strong>{readProof.model ?? "fixture"}</strong></div>
+                <div><span>source</span><strong>{readProof.source_id ?? run.source.source_id}</strong></div>
                 <div><span>duration</span><strong>{readProof.duration_ms ?? "—"} ms</strong></div>
                 <div><span>key suffix</span><strong>{readProof.api_key_suffix ?? "n/a"}</strong></div>
               </div>

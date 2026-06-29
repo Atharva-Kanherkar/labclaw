@@ -12,7 +12,7 @@ from labclaw.ledger import DEFAULT_MISSION
 from labclaw.pipeline import LabPipeline, demo_capabilities
 
 DATA_DIR = Path(os.environ.get("LABCLAW_DATA_DIR", "labclaw_data"))
-FIXTURE_MODE = os.environ.get("LABCLAW_FIXTURE_MODE", "1") not in {"0", "false", "False"}
+FIXTURE_MODE = os.environ.get("LABCLAW_FIXTURE_MODE", "0") not in {"0", "false", "False"}
 
 app = FastAPI(title="LabClaw API", version="0.1.0")
 app.add_middleware(
@@ -31,7 +31,7 @@ def health() -> dict[str, str | dict[str, bool]]:
     return {
         "status": "ok",
         "fixture_mode": str(FIXTURE_MODE).lower(),
-        "capabilities": demo_capabilities(),
+        "capabilities": demo_capabilities(fixture_mode=FIXTURE_MODE),
     }
 
 
@@ -39,7 +39,7 @@ def health() -> dict[str, str | dict[str, bool]]:
 def run_demo() -> dict:
     result = pipeline.run(mission=DEFAULT_MISSION)
     payload = result.to_dict()
-    payload["capabilities"] = demo_capabilities()
+    payload["capabilities"] = demo_capabilities(fixture_mode=FIXTURE_MODE)
     return payload
 
 

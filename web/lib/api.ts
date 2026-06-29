@@ -7,6 +7,7 @@ export function apiBase(): string {
 }
 
 export type DemoCapabilities = {
+  live_scouts?: boolean;
   fixture_scouts?: boolean;
   live_reader?: boolean;
   live_e2b?: boolean;
@@ -18,12 +19,14 @@ export type StageProof = {
   label?: string;
   model?: string;
   provider?: string;
+  source_id?: string;
   duration_ms?: number;
   api_key_suffix?: string;
   baseline_command?: string;
   candidate_command?: string;
   harness?: string;
   error?: string;
+  fallback_error?: string;
 };
 
 export type PipelineRun = {
@@ -75,7 +78,9 @@ export type PipelineRun = {
   demo_proof?: {
     started_at?: string;
     finished_at?: string;
+    live_scouts_used?: boolean;
     live_cerebras_used?: boolean;
+    live_e2b_used?: boolean;
     transparency?: {
       scout?: string;
       reader?: string;
@@ -84,6 +89,7 @@ export type PipelineRun = {
     };
     reader_proof?: StageProof;
     experiment_proof?: StageProof;
+    scout_proof?: StageProof;
   };
 };
 
