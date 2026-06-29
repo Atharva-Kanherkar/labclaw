@@ -27,6 +27,17 @@ Run the offline fixture parser:
 python -m labclaw.multimodal_reader samples/tiny-ml-claim.md --json --local-fixture
 ```
 
+Run the reader swarm speed demo on fixture sources:
+
+```bash
+python -m labclaw.speed_demo samples/tiny-ml-claim.md --repeat 4
+```
+
+The demo prints progress-friendly timing data for a reader swarm lane versus a
+simulated slower baseline. Fixture mode is deterministic for PR tests and videos
+and labels its lane as `fixture-parser` with simulated tok/s suppressed. Pass
+`--live-cerebras` to use the live Gemma lane when `CEREBRAS_API_KEY` is set.
+
 The live reader follows Cerebras image-input constraints:
 
 - model: `gemma-4-31b`
