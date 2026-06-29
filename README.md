@@ -211,3 +211,29 @@ metric, for example:
 
 The runner rejects unbounded shell control tokens and only runs the setup,
 baseline, and candidate commands carried by a bounded `ExperimentSpec`.
+
+## Evidence critic
+
+Issue #19 adds the truth gate before LabClaw reports a claim. The critic
+consumes normalized harness output plus optional run context (command log,
+artifacts, seeds, sample size) and returns a structured verdict:
+
+```python
+from labclaw.eval_harness import default_registry, spec_from_pi_proposal
+from labclaw.evidence_critic import EvidenceCritic, EvidenceInput, ReproducibilityContext
+
+spec = spec_from_pi_proposal({...})
+metric = default_registry().run(spec)
+verdict = EvidenceCritic().evaluate(
+    EvidenceInput(
+        spec=spec,
+        metric_result=metric,
+        run_status="succeeded",
+        reproducibility=ReproducibilityContext(random_seed=42, sample_size=128),
+    )
+)
+```
+
+Only `reproduced` verdicts with no blocking objections and sufficient confidence
+are `reportable`. Worse candidates are `refuted`; below-threshold null results are
+`inconclusive`; flaky timeouts become `rerun_needed`.
