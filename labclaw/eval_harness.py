@@ -8,6 +8,18 @@ from typing import Any, Callable, Mapping
 
 HarnessRunner = Callable[["ExperimentSpec"], "MetricResult"]
 
+LOWER_IS_BETTER_METRICS = {
+    "bits_per_byte",
+    "bpb",
+    "latency",
+    "memory",
+    "perplexity",
+    "ppl",
+    "validation_loss",
+    "val_loss",
+    "wall_clock",
+}
+
 
 @dataclass(frozen=True)
 class ExperimentSpec:
@@ -71,7 +83,7 @@ def spec_from_pi_proposal(
     proposal: Mapping[str, Any],
     *,
     harness: str = "tiny_metric",
-    direction: str = "higher_is_better",
+    direction: str | None = None,
     threshold: float | None = None,
     source_id: str | None = None,
 ) -> ExperimentSpec:
@@ -82,18 +94,20 @@ def spec_from_pi_proposal(
     missing = [key for key in required if not proposal.get(key)]
     if missing:
         raise ValueError(f"PI proposal missing required experiment field(s): {', '.join(missing)}")
-    threshold_mode, threshold_value = parse_threshold(proposal["threshold"])
+    threshold_mode, threshold_value, threshold_direction = parse_threshold(proposal["threshold"])
     if threshold is not None:
         threshold_mode = "absolute_delta"
         threshold_value = threshold
+        threshold_direction = None
+    metric = str(proposal["metric"])
     return ExperimentSpec(
         claim_id=str(proposal["claim_id"]),
         cluster_id=str(proposal["cluster_id"]),
         harness=harness,
         baseline_command=str(proposal["baseline_command"]),
         candidate_command=str(proposal["candidate_command"]),
-        metric=str(proposal["metric"]),
-        direction=direction,
+        metric=metric,
+        direction=direction or threshold_direction or infer_metric_direction(metric),
         threshold=threshold_value,
         threshold_mode=threshold_mode,
         goal=str(proposal.get("goal", "")),
@@ -104,8 +118,8 @@ def spec_from_pi_proposal(
 
 def tiny_metric_harness(spec: ExperimentSpec) -> MetricResult:
     try:
-        baseline = metric_value(spec.baseline_command)
-        candidate = metric_value(spec.candidate_command)
+        baseline = metric_value(spec.baseline_command, expected_metric=spec.metric)
+        candidate = metric_value(spec.candidate_command, expected_metric=spec.metric)
     except ValueError as exc:
         return MetricResult(
             claim_id=spec.claim_id,
@@ -156,7 +170,7 @@ def tiny_metric_harness(spec: ExperimentSpec) -> MetricResult:
         raise ValueError(f"Unknown threshold mode: {spec.threshold_mode}")
 
     status = "improved" if improved else "no_change"
-    if delta < 0:
+    if not improved and delta < 0:
         status = "worse"
 
     return MetricResult(
@@ -182,12 +196,14 @@ def default_registry() -> HarnessRegistry:
     return registry
 
 
-def metric_value(command: str) -> float:
+def metric_value(command: str, *, expected_metric: str | None = None) -> float:
     """Parse deterministic fixture commands such as `metric:tokens_per_second=55`."""
     prefix = "metric:"
     if not command.startswith(prefix):
         raise ValueError(f"Command did not emit fixture metric: {command}")
-    _, _, value = command.partition("=")
+    metric_name, _, value = command.removeprefix(prefix).partition("=")
+    if expected_metric and metric_name != expected_metric:
+        raise ValueError(f"Fixture metric {metric_name} did not match expected metric {expected_metric}.")
     if not value:
         raise ValueError(f"Fixture metric command missing value: {command}")
     try:
@@ -196,20 +212,31 @@ def metric_value(command: str) -> float:
         raise ValueError(f"Fixture metric value is not numeric: {value}") from exc
 
 
-def parse_threshold(raw: Any) -> tuple[str, float]:
+def parse_threshold(raw: Any) -> tuple[str, float, str | None]:
     if isinstance(raw, (int, float)):
-        return "absolute_delta", float(raw)
+        return "absolute_delta", float(raw), None
     text = str(raw).strip()
     if text.startswith("delta>="):
-        return "absolute_delta", float(text.removeprefix("delta>=").strip())
+        return "absolute_delta", float(text.removeprefix("delta>=").strip()), None
     ratio_match = re.fullmatch(
-        r"candidate\s*(?:>=|<=)\s*baseline\s*\*\s*(\d+(?:\.\d+)?)",
+        r"candidate\s*(>=|<=)\s*baseline\s*\*\s*(\d+(?:\.\d+)?)",
         text,
         flags=re.IGNORECASE,
     )
     if ratio_match:
-        return "relative_ratio", float(ratio_match.group(1))
+        operator = ratio_match.group(1)
+        direction = "lower_is_better" if operator == "<=" else "higher_is_better"
+        return "relative_ratio", float(ratio_match.group(2)), direction
     try:
-        return "absolute_delta", float(text)
+        return "absolute_delta", float(text), None
     except ValueError as exc:
         raise ValueError(f"Threshold must be numeric, delta>=N, or candidate >= baseline * R, got: {raw}") from exc
+
+
+def infer_metric_direction(metric: str) -> str:
+    normalized = metric.strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized in LOWER_IS_BETTER_METRICS or any(
+        token in normalized for token in ("loss", "latency", "memory", "perplexity")
+    ):
+        return "lower_is_better"
+    return "higher_is_better"

@@ -96,6 +96,42 @@ def test_tiny_metric_harness_supports_relative_ratio_threshold() -> None:
     assert result.delta == 13.0
 
 
+def test_tiny_metric_harness_infers_lower_is_better_from_ratio_threshold() -> None:
+    spec = spec_from_pi_proposal(
+        pi_proposal(
+            baseline_command="metric:validation_loss=1.2",
+            candidate_command="metric:validation_loss=0.9",
+            metric="validation_loss",
+            threshold="candidate <= baseline * 0.90",
+        )
+    )
+
+    result = default_registry().run(spec)
+
+    assert spec.direction == "lower_is_better"
+    assert result.status == "improved"
+    assert result.improved is True
+    assert result.delta == pytest.approx(0.3)
+    assert result.threshold_mode == "relative_ratio"
+
+
+def test_tiny_metric_harness_infers_lower_is_better_from_metric_name() -> None:
+    spec = spec_from_pi_proposal(
+        pi_proposal(
+            baseline_command="metric:latency=120",
+            candidate_command="metric:latency=100",
+            metric="latency",
+            threshold="delta>=10",
+        )
+    )
+
+    result = default_registry().run(spec)
+
+    assert spec.direction == "lower_is_better"
+    assert result.status == "improved"
+    assert result.delta == 20.0
+
+
 def test_tiny_metric_harness_detects_no_change() -> None:
     spec = spec_from_pi_proposal(pi_proposal(candidate_command="metric:tokens_per_second=45"))
 
@@ -153,3 +189,36 @@ def test_tiny_metric_harness_reports_failed_run() -> None:
     assert result.candidate is None
     assert result.delta is None
     assert "did not emit fixture metric" in result.failure_reason
+
+
+def test_tiny_metric_harness_rejects_metric_name_mismatch() -> None:
+    spec = ExperimentSpec(
+        claim_id="claim-mismatch",
+        cluster_id="cluster-speed",
+        harness="tiny_metric",
+        baseline_command="metric:latency=42",
+        candidate_command="metric:tokens_per_second=55",
+        metric="tokens_per_second",
+        direction="higher_is_better",
+        threshold=5.0,
+    )
+
+    result = default_registry().run(spec)
+
+    assert result.status == "failed"
+    assert "did not match expected metric" in result.failure_reason
+
+
+def test_tiny_metric_harness_keeps_status_consistent_with_negative_threshold() -> None:
+    spec = spec_from_pi_proposal(
+        pi_proposal(
+            candidate_command="metric:tokens_per_second=40",
+            threshold="delta>=-5",
+        )
+    )
+
+    result = default_registry().run(spec)
+
+    assert result.improved is True
+    assert result.status == "improved"
+    assert result.delta == -2.0

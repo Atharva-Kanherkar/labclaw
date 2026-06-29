@@ -149,7 +149,10 @@ candidate commands, metric, direction, threshold, and harness name. A harness
 returns normalized metric JSON with baseline, candidate, delta, status, artifacts,
 and failure reason.
 Thresholds can be absolute deltas like `delta>=5` or PI-style ratios like
-`candidate >= baseline * 1.10`.
+`candidate >= baseline * 1.10`; `<=` ratio thresholds infer lower-is-better.
+The bundled `tiny_metric` harness is fixture-only: it parses commands shaped like
+`metric:NAME=VALUE` and validates `NAME` against the spec metric. Real command
+execution belongs to the E2B runner in #17.
 
 ```python
 from labclaw.eval_harness import default_registry, spec_from_pi_proposal
