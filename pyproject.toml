@@ -10,6 +10,7 @@ dev = ["pytest>=8.0"]
 
 [project.scripts]
 labclaw-read = "labclaw.multimodal_reader:main"
+labclaw-speed-demo = "labclaw.speed_demo:main"
 labclaw-bot = "labclaw.telegram:main"
 labclaw = "labclaw.daemon:main"
 
