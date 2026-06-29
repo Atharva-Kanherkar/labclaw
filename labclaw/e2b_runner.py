@@ -5,13 +5,16 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import asdict, dataclass, field
+import time
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
 from labclaw.eval_harness import ExperimentSpec, MetricResult
 
-DEFAULT_E2B_TEMPLATE = "labclaw-ml-runner"
+# "base" works in any E2B account out of the box. Pin a custom ML template
+# (preinstalled deps) here once it is built; override per-run via E2B_TEMPLATE.
+DEFAULT_E2B_TEMPLATE = "base"
 FORBIDDEN_SHELL_TOKENS = ("&&", "||", ";", "|", "`", "$(", ">", "<")
 
 
@@ -158,6 +161,7 @@ class E2BExperimentRunner:
         timeout_seconds: int,
         commands: list[SandboxCommandResult],
     ) -> SandboxCommandResult:
+        started = time.perf_counter()
         try:
             result = sandbox.run(command, timeout_seconds=timeout_seconds)
         except SandboxTimeout as exc:
@@ -167,9 +171,12 @@ class E2BExperimentRunner:
                     stdout="",
                     stderr=str(exc),
                     exit_code=-1,
+                    duration_seconds=time.perf_counter() - started,
                 )
             )
             raise
+        if result.duration_seconds is None:
+            result = replace(result, duration_seconds=time.perf_counter() - started)
         commands.append(result)
         return result
 
@@ -248,7 +255,21 @@ class E2BSandboxSession:
         self.sandbox.files.write(path, content)
 
     def run(self, command: str, *, timeout_seconds: int) -> SandboxCommandResult:
-        result = self.sandbox.commands.run(command, timeout=timeout_seconds)
+        from e2b import CommandExitException, TimeoutException
+
+        try:
+            result = self.sandbox.commands.run(command, timeout=timeout_seconds)
+        except CommandExitException as exc:
+            # E2B raises on non-zero exit. Surface it as a result so the runner
+            # records the failure and stops cleanly instead of crashing.
+            return SandboxCommandResult(
+                command=command,
+                stdout=str(getattr(exc, "stdout", "") or ""),
+                stderr=str(getattr(exc, "stderr", "") or ""),
+                exit_code=int(getattr(exc, "exit_code", 1) or 1),
+            )
+        except TimeoutException as exc:
+            raise SandboxTimeout(f"Command timed out after {timeout_seconds}s: {command}") from exc
         return SandboxCommandResult(
             command=command,
             stdout=str(getattr(result, "stdout", "")),
