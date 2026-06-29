@@ -64,7 +64,7 @@ def demo_capabilities(*, fixture_mode: bool) -> dict[str, bool]:
     }
 
 
-def parse_tok_s_benchmarks(claim: Any) -> tuple[float, float, list[str]]:
+def parse_tok_s_benchmarks(claim: Any, *, source_text: str = "") -> tuple[float, float, list[str]]:
     numbers = list(getattr(claim, "benchmark_numbers", None) or [])
     if not numbers and isinstance(claim, dict):
         numbers = list(claim.get("benchmark_numbers") or [])
@@ -72,6 +72,11 @@ def parse_tok_s_benchmarks(claim: Any) -> tuple[float, float, list[str]]:
     for text in numbers:
         for match in re.finditer(r"(\d+(?:\.\d+)?)\s*tok/s", str(text), flags=re.IGNORECASE):
             values.append(float(match.group(1)))
+    if len(values) < 2 and source_text:
+        for match in re.finditer(r"(\d+(?:\.\d+)?)\s*tok/s", source_text, flags=re.IGNORECASE):
+            values.append(float(match.group(1)))
+        if values and not numbers:
+            numbers = re.findall(r"\d+(?:\.\d+)?\s*tok/s", source_text, flags=re.IGNORECASE)
     if len(values) >= 2:
         return values[0], values[1], numbers
     raise ValueError(f"Claim missing baseline/candidate tok/s benchmarks, got: {numbers}")
@@ -173,6 +178,17 @@ class LabPipeline:
 
         reader_result, read_summary, read_proof = self._stage_read(source)
         claim = self._pick_claim(reader_result)
+        try:
+            parse_tok_s_benchmarks(claim, source_text=source.raw_text or "")
+        except ValueError:
+            if source.metadata.get("curated_demo_source"):
+                raise
+            source = self._sample_source_record()
+            source.metadata["curated_demo_source"] = True
+            source.metadata["reason"] = "Live source lacked explicit tok/s benchmarks after Cerebras read"
+            reader_result, read_summary, read_proof = self._stage_read(source)
+            read_summary = f"{read_summary} · curated demo claim source"
+            claim = self._pick_claim(reader_result)
         read_payload = reader_to_dict(reader_result)
         read_payload["proof"] = read_proof
         stages.append(StageSnapshot("read", "succeeded", read_summary, read_payload))
@@ -381,16 +397,8 @@ class LabPipeline:
                     return record
 
         def score(record: SourceRecord) -> int:
-            text = (record.raw_text or record.title or "").lower()
-            points = 0
-            if re.search(r"\d+(?:\.\d+)?\s*tok/s", text, flags=re.IGNORECASE):
-                points += 10
-            if re.search(r"\d+(?:\.\d+)?\s*tokens/sec", text, flags=re.IGNORECASE):
-                points += 10
-            for token in ("benchmark", "throughput", "optimizer"):
-                if token in text:
-                    points += 2
-            return points
+            text = record.raw_text or ""
+            return len(re.findall(r"\d+(?:\.\d+)?\s*tok/s", text, flags=re.IGNORECASE)) * 10
 
         ranked = sorted(sources, key=score, reverse=True)
         if score(ranked[0]) > 0:
@@ -526,7 +534,10 @@ class LabPipeline:
         raise ValueError("Reader produced no claim cards.")
 
     def _build_experiment_spec(self, claim, cluster_id: str, source: SourceRecord) -> tuple[ExperimentSpec, dict[str, Any]]:
-        baseline_target, candidate_target, raw_numbers = parse_tok_s_benchmarks(claim)
+        baseline_target, candidate_target, raw_numbers = parse_tok_s_benchmarks(
+            claim,
+            source_text=source.raw_text or "",
+        )
         threshold = max(1.0, candidate_target - baseline_target)
         code_hooks = list(getattr(claim, "code_hooks", None) or [])
         if live_e2b_enabled():
