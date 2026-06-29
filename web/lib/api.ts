@@ -36,6 +36,11 @@ export type PipelineRun = {
     summary: string;
     payload?: { markdown?: string };
   }>;
+  capabilities?: {
+    live_reader?: boolean;
+    live_e2b?: boolean;
+    gemini_pi?: boolean;
+  };
 };
 
 export async function runDemo(): Promise<PipelineRun> {

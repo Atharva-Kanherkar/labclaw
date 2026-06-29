@@ -51,6 +51,11 @@ export default function DemoDashboard() {
           >
             {loading ? "Running heartbeat…" : "Run demo heartbeat"}
           </button>
+          {run?.capabilities?.live_reader ? (
+            <span className="chip chip-good">live Cerebras reader</span>
+          ) : (
+            <span className="chip chip-muted">fixture reader</span>
+          )}
         </div>
         {error ? <p className="demo-error">{error}</p> : null}
       </header>
