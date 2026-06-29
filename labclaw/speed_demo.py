@@ -37,7 +37,7 @@ class LaneSummary:
     elapsed_ms: float
     latency_ms_per_source: float
     estimated_tokens: int
-    estimated_tokens_per_second: float
+    estimated_tokens_per_second: float | None
     claim_cards_produced: int
     errors: int
     simulated: bool
@@ -116,9 +116,10 @@ def run_fast_lane(
     live_cerebras: bool,
     emit: Callable[[ProgressEvent], None],
 ) -> tuple[list[ReaderSourceResult], LaneSummary]:
-    lane = "cerebras-gemma-swarm"
+    lane = "cerebras-gemma-swarm" if live_cerebras else "fixture-reader-swarm"
+    provider = "cerebras/gemma-4-31b" if live_cerebras else "fixture-parser"
     started = time.perf_counter()
-    emit(ProgressEvent("lane_started", lane, None, "started Cerebras/Gemma reader swarm", 0.0))
+    emit(ProgressEvent("lane_started", lane, None, f"started {provider} reader swarm", 0.0))
     results = read_sources(sources, max_workers=max_workers, use_gemma=live_cerebras)
     elapsed_ms = (time.perf_counter() - started) * 1000
     for result in results:
@@ -134,13 +135,13 @@ def run_fast_lane(
         )
     summary = summarize_lane(
         name=lane,
-        provider="cerebras/gemma-4-31b",
+        provider=provider,
         sources=sources,
         results=results,
         elapsed_ms=elapsed_ms,
         simulated=not live_cerebras,
     )
-    emit(ProgressEvent("lane_finished", lane, None, "finished Cerebras/Gemma reader swarm", elapsed_ms))
+    emit(ProgressEvent("lane_finished", lane, None, f"finished {provider} reader swarm", elapsed_ms))
     return results, summary
 
 
@@ -220,6 +221,7 @@ def summarize_lane(
     errors = sum(1 for result in results if not result.ok)
     estimated_tokens = sum(estimate_tokens(source.content) for source in sources)
     elapsed_seconds = max(elapsed_ms / 1000, 0.001)
+    tokens_per_second = None if simulated else estimated_tokens / elapsed_seconds
     return LaneSummary(
         name=name,
         provider=provider,
@@ -227,7 +229,7 @@ def summarize_lane(
         elapsed_ms=elapsed_ms,
         latency_ms_per_source=elapsed_ms / max(len(sources), 1),
         estimated_tokens=estimated_tokens,
-        estimated_tokens_per_second=estimated_tokens / elapsed_seconds,
+        estimated_tokens_per_second=tokens_per_second,
         claim_cards_produced=cards,
         errors=errors,
         simulated=simulated,
@@ -261,6 +263,11 @@ def format_timing_table(report: SpeedDemoReport) -> str:
         "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for lane in report.lanes:
+        tokens_per_second = (
+            f"{lane.estimated_tokens_per_second:.1f}"
+            if lane.estimated_tokens_per_second is not None
+            else "n/a (simulated)"
+        )
         lines.append(
             "| "
             f"{lane.name} | "
@@ -268,7 +275,7 @@ def format_timing_table(report: SpeedDemoReport) -> str:
             f"{lane.sources_completed} | "
             f"{lane.elapsed_ms:.1f} | "
             f"{lane.latency_ms_per_source:.1f} | "
-            f"{lane.estimated_tokens_per_second:.1f} | "
+            f"{tokens_per_second} | "
             f"{lane.claim_cards_produced} | "
             f"{lane.errors} |"
         )

@@ -3,8 +3,10 @@
 ## Functional Behavior
 
 - Demo command runs against a fixture batch without live Cerebras credentials.
+- Fixture mode labels the fast lane as `fixture-parser` and suppresses tok/s
+  instead of presenting parser speed as a Cerebras measurement.
 - Fast lane uses the reader swarm API and reports sources completed, elapsed
-  time, estimated tokens/sec, claim cards, and per-source errors.
+  time, claim cards, and per-source errors.
 - Baseline lane simulates a slower provider when no live baseline is available.
 - Progress events are emitted for lane start, source completion, and lane finish.
 - Output includes a timing table plus the selected demo cluster.

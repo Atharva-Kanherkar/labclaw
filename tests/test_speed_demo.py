@@ -52,7 +52,9 @@ python bench.py --batch
     )
 
     assert report.selected_cluster == "demo-reader-swarm"
-    assert [lane.name for lane in report.lanes] == ["cerebras-gemma-swarm", "simulated-slower-baseline"]
+    assert [lane.name for lane in report.lanes] == ["fixture-reader-swarm", "simulated-slower-baseline"]
+    assert report.lanes[0].provider == "fixture-parser"
+    assert report.lanes[0].estimated_tokens_per_second is None
     assert [lane.sources_completed for lane in report.lanes] == [2, 2]
     assert all(lane.claim_cards_produced == 2 for lane in report.lanes)
     assert any(event.event == "lane_started" for event in events)
@@ -78,9 +80,10 @@ python bench.py --decode
     table = format_timing_table(report)
 
     assert "Selected cluster: demo-reader-swarm" in table
-    assert "cerebras-gemma-swarm" in table
+    assert "fixture-reader-swarm" in table
+    assert "fixture-parser (simulated)" in table
     assert "simulated-slower-baseline" in table
-    assert "Est tok/s" in table
+    assert "n/a (simulated)" in table
     assert "Claim cards" in table
 
 
