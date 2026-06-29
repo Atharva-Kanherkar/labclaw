@@ -1,4 +1,10 @@
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const API_BASE =
+  process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ??
+  "http://localhost:8000";
+
+export function apiBase(): string {
+  return API_BASE;
+}
 
 export type PipelineRun = {
   run_id: string;
