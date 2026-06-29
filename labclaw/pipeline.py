@@ -262,7 +262,7 @@ class LabPipeline:
                 "finished_at": utc_now(),
                 "live_cerebras_used": read_proof.get("mode") == "live_cerebras",
                 "live_e2b_used": experiment_proof.get("mode") == "live_e2b",
-                "live_scouts_used": scout_proof.get("mode") == "live_network",
+                "live_scouts_used": scout_proof.get("mode") in {"live_network", "live_network_refresh"},
                 "reader_proof": read_proof,
                 "experiment_proof": experiment_proof,
                 "scout_proof": scout_proof,
@@ -301,28 +301,46 @@ class LabPipeline:
             from labclaw.figures import FigureStore
             from labclaw.sources import Fetcher
 
+            fetcher = Fetcher()
+            figure_store = FigureStore(self.data_dir / "figures", fetcher)
+            scouts = [ArxivScout(fetcher, max_results=5), GitHubScout(fetcher, max_results=5)]
             try:
-                fetcher = Fetcher()
-                figure_store = FigureStore(self.data_dir / "figures", fetcher)
-                scouts = [ArxivScout(fetcher, max_results=5), GitHubScout(fetcher, max_results=5)]
                 records = run_scouts(scouts, seen_store=seen, figure_store=figure_store)
+                if not records:
+                    records = self._discover_live_sources(scouts, figure_store=figure_store)
+                    proof_mode = "live_network_refresh"
+                    proof_label = "Live arXiv + GitHub fetch (seen-store refresh for demo heartbeat)"
+                else:
+                    proof_mode = "live_network"
+                    proof_label = "Live arXiv + GitHub scout network fetch"
                 seen.save()
                 if not records:
-                    raise RuntimeError("Live scouts returned no new sources")
-                proof = {
-                    "mode": "live_network",
-                    "label": "Live arXiv + GitHub scout network fetch",
-                    "count": len(records),
-                }
-                return records, f"LIVE scouts · {len(records)} new source(s)", proof
+                    raise RuntimeError("Live scouts returned no sources from arXiv or GitHub")
+                proof = {"mode": proof_mode, "label": proof_label, "count": len(records)}
+                return records, f"LIVE scouts · {len(records)} source(s)", proof
             except Exception as exc:
-                records, summary, proof = self._fixture_scout(seen)
-                proof["fallback_error"] = str(exc)
-                proof["label"] = "Fixture scout fallback after live network error"
-                return records, f"{summary} (fallback: {exc})", proof
+                raise RuntimeError(f"Live scout network failed: {exc}") from exc
 
         records, summary, proof = self._fixture_scout(seen)
         return records, summary, proof
+
+    def _discover_live_sources(
+        self,
+        scouts: list,
+        *,
+        figure_store: Any,
+        max_figures_per_source: int = 5,
+    ) -> list[SourceRecord]:
+        """Fetch the latest scout results even if they were seen before (demo heartbeat)."""
+        from labclaw.sources import _attach_figures
+
+        records: list[SourceRecord] = []
+        for scout in scouts:
+            for record in scout.discover():
+                if figure_store is not None:
+                    _attach_figures(record, figure_store, max_figures_per_source)
+                records.append(record)
+        return records
 
     def _fixture_scout(self, seen: SeenStore) -> tuple[list[SourceRecord], str, dict[str, Any]]:
         fetcher = MappingFetcher(
@@ -377,6 +395,13 @@ class LabPipeline:
         ranked = sorted(sources, key=score, reverse=True)
         if score(ranked[0]) > 0:
             return ranked[0]
+
+        if not self.fixture_mode:
+            curated = self._sample_source_record()
+            curated.metadata["curated_demo_source"] = True
+            curated.metadata["reason"] = "No live scout source contained explicit tok/s benchmarks"
+            return curated
+
         return sources[0]
 
     def _to_reader_record(self, source: SourceRecord) -> ReaderSourceRecord:
