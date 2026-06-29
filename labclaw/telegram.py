@@ -30,12 +30,26 @@ from typing import Any, Callable, Optional
 API_ROOT = "https://api.telegram.org"
 DEFAULT_TIMEOUT = 30
 DEFAULT_POLL_TIMEOUT = 25
+# Only the update types we actually handle, so Telegram doesn't ship the rest.
+DEFAULT_ALLOWED_UPDATES = ["message", "edited_message"]
 
 # A transport takes (url, payload_dict) and returns the decoded JSON response.
 Transport = Callable[[str, dict], dict]
 
 # A command handler takes (args_string, message_dict) and returns reply text.
 CommandHandler = Callable[[str, dict], Optional[str]]
+
+
+def redact_token(text: str, token: Optional[str]) -> str:
+    """Strip the bot token from any string before it is logged or surfaced.
+
+    urllib embeds the request URL (which contains /bot<TOKEN>/) in its error
+    messages and tracebacks, so a raw network error would otherwise leak the
+    token into logs.
+    """
+    if not token:
+        return text
+    return text.replace(token, "<token>")
 
 
 @dataclass
@@ -77,6 +91,9 @@ def _urllib_transport(url: str, payload: dict, *, timeout: int) -> dict:
             return json.loads(body)
         except json.JSONDecodeError:
             return {"ok": False, "description": f"HTTP {exc.code}: {body}"}
+    # NOTE: connection-level failures (URLError, socket timeout, OSError) are
+    # intentionally NOT caught here -- they propagate so run_polling can apply
+    # its retry/backoff. Callers that surface these must redact the token.
 
 
 class TelegramError(RuntimeError):
@@ -121,13 +138,20 @@ class TelegramClient:
             params["disable_notification"] = True
         return self._call("sendMessage", params)
 
-    def get_updates(self, offset: Optional[int] = None, timeout: Optional[int] = None) -> list:
+    def get_updates(
+        self,
+        offset: Optional[int] = None,
+        timeout: Optional[int] = None,
+        allowed_updates: Optional[list] = None,
+    ) -> list:
         """Long-poll for incoming updates (messages, commands)."""
         params: dict[str, Any] = {
             "timeout": self.config.poll_timeout if timeout is None else timeout
         }
         if offset is not None:
             params["offset"] = offset
+        if allowed_updates is not None:
+            params["allowed_updates"] = allowed_updates
         return self._call("getUpdates", params)
 
     def get_me(self) -> dict:
@@ -244,14 +268,17 @@ class LabClawBot:
             # Imported lazily so the bot loads without the reader's deps.
             from labclaw.multimodal_reader import format_human_result, read_source
 
-            # Live Gemma extraction needs a key; --local forces offline parsing.
+            # KNOWN LIMITATION: this runs synchronously inside the poll loop, so
+            # a live Gemma extraction blocks all other updates and pauses polling
+            # until it returns. Acceptable for a single-user MVP; move to a
+            # worker/queue if concurrency is needed.
             use_gemma = not force_local and bool(os.environ.get("CEREBRAS_API_KEY"))
             try:
                 result = read_source(source, use_gemma=use_gemma)
             except RuntimeError as exc:
                 if not use_gemma:
                     raise
-                # Cerebras SDK/key missing — fall back so /read still works.
+                # Cerebras SDK/key missing -- fall back so /read still works.
                 result = read_source(source, use_gemma=False)
                 note = f"(live reader unavailable: {exc}; used offline parser)\n"
                 return note + format_human_result(result)
@@ -272,7 +299,14 @@ class LabClawBot:
         return force_local, " ".join(parts).strip()
 
     def handle_update(self, update: dict) -> Optional[str]:
-        """Process one update; send a reply if a handler produced one."""
+        """Process one update; send a reply if a handler produced one.
+
+        Delivery is intentionally AT MOST ONCE: the offset advances as soon as
+        we see the update, before the reply is sent. If send_message fails the
+        reply is lost rather than redelivered. This is deliberate -- advancing
+        only after a successful send would let a permanently-failing update
+        (poison pill) wedge the bot in an infinite reprocess loop.
+        """
         update_id = update.get("update_id")
         if isinstance(update_id, int):
             self._offset = update_id + 1
@@ -286,24 +320,48 @@ class LabClawBot:
         return reply
 
     def poll_once(self) -> int:
-        """Fetch and handle one batch of updates. Returns the count handled."""
-        updates = self.client.get_updates(offset=self._offset)
+        """Fetch and handle one batch of updates. Returns the count handled.
+
+        Network errors propagate to the caller (run_polling), which retries.
+        """
+        updates = self.client.get_updates(
+            offset=self._offset, allowed_updates=DEFAULT_ALLOWED_UPDATES
+        )
         for update in updates:
             self.handle_update(update)
         return len(updates)
 
-    def run_polling(self, *, idle_sleep: float = 1.0) -> None:
-        """Block forever, long-polling for updates. Ctrl+C to stop."""
-        me = self.client.get_me()
-        print(f"LabClaw bot running as @{me.get('username', '?')}. Ctrl+C to stop.")
-        while True:
+    def run_polling(
+        self,
+        *,
+        idle_sleep: float = 1.0,
+        error_sleep: float = 5.0,
+        max_cycles: Optional[int] = None,
+    ) -> None:
+        """Block (almost) forever, long-polling for updates. Ctrl+C to stop.
+
+        Survives transient failures: Telegram API errors AND connection-level
+        failures (dropped connection, DNS hiccup, socket timeout) are caught and
+        retried after error_sleep, so an always-on bot doesn't die on the first
+        network blip. max_cycles bounds the loop for testing.
+        """
+        token = self.client.config.token
+        try:
+            me = self.client.get_me()
+            print(f"LabClaw bot running as @{me.get('username', '?')}. Ctrl+C to stop.")
+        except (TelegramError, urllib.error.URLError, OSError) as exc:
+            print(f"Startup warning: {redact_token(str(exc), token)}", file=sys.stderr)
+
+        cycles = 0
+        while max_cycles is None or cycles < max_cycles:
+            cycles += 1
             try:
                 handled = self.poll_once()
                 if handled == 0:
                     time.sleep(idle_sleep)
-            except TelegramError as exc:
-                print(f"Telegram error: {exc}", file=sys.stderr)
-                time.sleep(5)
+            except (TelegramError, urllib.error.URLError, OSError) as exc:
+                print(f"Polling error: {redact_token(str(exc), token)}", file=sys.stderr)
+                time.sleep(error_sleep)
             except KeyboardInterrupt:
                 print("\nStopped.")
                 return

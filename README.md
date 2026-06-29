@@ -79,6 +79,14 @@ from labclaw.telegram import notify
 notify("Claim reproduced: 2.3x speedup confirmed")
 ```
 
+Notes and limitations:
+
+- The bot long-polls and survives transient network failures (dropped
+  connections, DNS hiccups, socket timeouts) with retry/backoff.
+- Update handling is synchronous and single-threaded: a live `/read`
+  extraction blocks other updates until it finishes (fine for one user).
+- Delivery is at-most-once: if a reply send fails it is not redelivered.
+
 Run tests:
 
 ```bash

@@ -191,3 +191,84 @@ def test_poll_once_handles_batch_and_advances_offset():
     handled = bot.poll_once()
     assert handled == 2
     assert bot._offset == 7
+
+
+# --------------------------------------------------------------------------- #
+# Resilience: network errors, token redaction, allowed_updates
+# --------------------------------------------------------------------------- #
+
+import urllib.error
+
+from labclaw.telegram import DEFAULT_ALLOWED_UPDATES, redact_token
+
+
+def test_poll_once_sets_allowed_updates():
+    client, transport = make_client([{"ok": True, "result": []}])
+    bot = LabClawBot(client)
+    bot.poll_once()
+    _, payload = transport.calls[0]
+    assert payload["allowed_updates"] == DEFAULT_ALLOWED_UPDATES
+
+
+def test_poll_once_propagates_network_error():
+    # Connection-level failures are not swallowed by the client; they surface
+    # so run_polling can retry them.
+    def transport(url, payload):
+        raise urllib.error.URLError("name resolution failed")
+
+    config = TelegramConfig(token="TOK", default_chat_id="1")
+    client = TelegramClient(config, transport=transport)
+    bot = LabClawBot(client)
+    with pytest.raises(urllib.error.URLError):
+        bot.poll_once()
+
+
+def test_run_polling_survives_network_error_and_retries():
+    calls = {"updates": 0}
+
+    def transport(url, payload):
+        if url.endswith("/getMe"):
+            return {"ok": True, "result": {"username": "bot"}}
+        calls["updates"] += 1
+        if calls["updates"] == 1:
+            raise urllib.error.URLError("dropped connection")  # first poll blows up
+        return {"ok": True, "result": []}  # then recovers
+
+    config = TelegramConfig(token="TOK", default_chat_id="1")
+    client = TelegramClient(config, transport=transport)
+    bot = LabClawBot(client)
+    # Must not raise; must retry the poll after the error.
+    bot.run_polling(idle_sleep=0, error_sleep=0, max_cycles=2)
+    assert calls["updates"] >= 2
+
+
+def test_run_polling_survives_oserror():
+    def transport(url, payload):
+        if url.endswith("/getMe"):
+            return {"ok": True, "result": {"username": "bot"}}
+        raise OSError("socket timeout")
+
+    config = TelegramConfig(token="TOK", default_chat_id="1")
+    client = TelegramClient(config, transport=transport)
+    bot = LabClawBot(client)
+    bot.run_polling(idle_sleep=0, error_sleep=0, max_cycles=3)  # should not crash
+
+
+def test_redact_token_scrubs_token_from_error_text():
+    leaked = "URLError at https://api.telegram.org/botSECRET123/getUpdates"
+    cleaned = redact_token(leaked, "SECRET123")
+    assert "SECRET123" not in cleaned
+    assert "<token>" in cleaned
+
+
+def test_run_polling_startup_survives_network_error(capsys):
+    # get_me failing at startup must not crash the loop.
+    def transport(url, payload):
+        if url.endswith("/getMe"):
+            raise urllib.error.URLError("boom")
+        return {"ok": True, "result": []}
+
+    config = TelegramConfig(token="TOK", default_chat_id="1")
+    client = TelegramClient(config, transport=transport)
+    bot = LabClawBot(client)
+    bot.run_polling(idle_sleep=0, error_sleep=0, max_cycles=1)  # should not crash
