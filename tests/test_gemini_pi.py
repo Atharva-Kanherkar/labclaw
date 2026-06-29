@@ -59,6 +59,18 @@ def sample_decision():
     }
 
 
+def declined_decision():
+    payload = sample_decision()
+    payload["experiment_proposal"] = {
+        "claim_id": "claim-weak",
+        "cluster_id": "cluster-speed",
+        "should_run": False,
+        "goal": "Reject the weak claim before VM spend.",
+        "rationale": "No explicit baseline/candidate commands were found.",
+    }
+    return payload
+
+
 def test_gemini_pi_builds_versioned_prompt() -> None:
     messages = build_pi_messages(
         PIInputs(
@@ -112,6 +124,27 @@ def test_gemini_pi_parses_mocked_structured_decision() -> None:
     assert decision.interpretation.startswith("Promising")
 
 
+def test_gemini_pi_allows_declined_experiment_without_fabricated_commands() -> None:
+    pi = GeminiPI(FakePIClient(declined_decision()))
+
+    decision = pi.decide(mission="Reject weak claims before E2B spend.")
+
+    assert decision.experiment_proposal.should_run is False
+    assert decision.experiment_proposal.baseline_command == ""
+    assert decision.experiment_proposal.candidate_command == ""
+    assert decision.experiment_proposal.metric == ""
+    assert decision.experiment_proposal.threshold == ""
+
+
+def test_gemini_pi_requires_experiment_commands_when_should_run() -> None:
+    payload = sample_decision()
+    payload["experiment_proposal"].pop("baseline_command")
+    pi = GeminiPI(FakePIClient(payload))
+
+    with pytest.raises(ValueError, match="baseline_command"):
+        pi.decide(mission="Run bounded claims.")
+
+
 def test_gemini_pi_accepts_json_string_from_client() -> None:
     pi = GeminiPI(FakePIClient(json.dumps(sample_decision())))
 
@@ -141,3 +174,42 @@ def test_gemini_client_requires_api_key_for_live_use(monkeypatch: pytest.MonkeyP
 
     with pytest.raises(RuntimeError, match="GEMINI_API_KEY"):
         GeminiAPIClient()
+
+
+class FakeModels:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def generate_content(self, *, model, contents, config):
+        self.calls.append({"model": model, "contents": contents, "config": config})
+        return type("Response", (), {"text": json.dumps(sample_decision())})()
+
+
+class FakeGenAIClient:
+    def __init__(self) -> None:
+        self.models = FakeModels()
+
+
+def test_gemini_api_client_uses_response_schema_and_system_instruction() -> None:
+    fake_genai = FakeGenAIClient()
+    client = GeminiAPIClient(genai_client=fake_genai)
+    messages = build_pi_messages(
+        PIInputs(
+            mission="Track measurable code claims.",
+            cluster_memory=[],
+            source_summaries=[],
+            claim_cards=[],
+            experiment_results=[],
+        )
+    )
+
+    raw = client.complete_json(messages=messages, schema={"type": "object"}, model=DEFAULT_PI_MODEL)
+
+    call = fake_genai.models.calls[0]
+    assert json.loads(raw)["schema_version"] == PI_SCHEMA_VERSION
+    assert call["model"] == DEFAULT_PI_MODEL
+    assert call["contents"] == messages[1]["content"]
+    assert call["config"]["system_instruction"] == messages[0]["content"]
+    assert call["config"]["response_mime_type"] == "application/json"
+    assert call["config"]["response_schema"] == {"type": "object"}
+    assert "response_json_schema" not in call["config"]

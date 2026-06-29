@@ -116,6 +116,8 @@ For editable checkouts without installed console scripts, use
 Issue #13 adds the strategic PI layer. It turns mission/context into a structured
 decision: search plan, cluster priorities, experiment proposal, notification
 decision, and interpretation.
+When the PI rejects a weak claim with `should_run=False`, it can omit
+baseline/candidate commands instead of inventing them.
 
 Tests use an injected fake client, so no Gemini credentials are required:
 

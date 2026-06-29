@@ -67,10 +67,6 @@ PI_DECISION_SCHEMA = {
                 "cluster_id",
                 "should_run",
                 "goal",
-                "baseline_command",
-                "candidate_command",
-                "metric",
-                "threshold",
                 "rationale",
             ],
             "additionalProperties": False,
@@ -201,7 +197,11 @@ class GeminiPI:
 class GeminiAPIClient:
     """Optional live Gemini adapter; tests should inject a fake client instead."""
 
-    def __init__(self, *, api_key: str | None = None) -> None:
+    def __init__(self, *, api_key: str | None = None, genai_client: Any | None = None) -> None:
+        if genai_client is not None:
+            self.api_key = api_key
+            self._client = genai_client
+            return
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
         if not self.api_key:
             raise RuntimeError("Set GEMINI_API_KEY or GOOGLE_API_KEY to use the live Gemini PI client.")
@@ -218,13 +218,17 @@ class GeminiAPIClient:
         schema: dict[str, Any],
         model: str,
     ) -> Mapping[str, Any] | str:
-        prompt = "\n\n".join(f"{message['role'].upper()}:\n{message['content']}" for message in messages)
+        system_instruction = "\n\n".join(
+            message["content"] for message in messages if message["role"] == "system"
+        )
+        contents = "\n\n".join(message["content"] for message in messages if message["role"] != "system")
         response = self._client.models.generate_content(
             model=model,
-            contents=prompt,
+            contents=contents,
             config={
                 "response_mime_type": "application/json",
-                "response_json_schema": schema,
+                "response_schema": schema,
+                "system_instruction": system_instruction,
                 "temperature": 0.2,
             },
         )
@@ -285,6 +289,12 @@ def decision_from_payload(payload: Mapping[str, Any]) -> PIDecision:
     notification = payload["notification_decision"]
     require_keys(search_plan, PI_DECISION_SCHEMA["properties"]["search_plan"]["required"], "search_plan")
     require_keys(experiment, PI_DECISION_SCHEMA["properties"]["experiment_proposal"]["required"], "experiment_proposal")
+    if bool(experiment["should_run"]):
+        require_keys(
+            experiment,
+            ["baseline_command", "candidate_command", "metric", "threshold"],
+            "experiment_proposal",
+        )
     require_keys(notification, PI_DECISION_SCHEMA["properties"]["notification_decision"]["required"], "notification_decision")
     for index, cluster in enumerate(payload["cluster_priorities"]):
         require_keys(
@@ -314,10 +324,10 @@ def decision_from_payload(payload: Mapping[str, Any]) -> PIDecision:
             cluster_id=str(experiment["cluster_id"]),
             should_run=bool(experiment["should_run"]),
             goal=str(experiment["goal"]),
-            baseline_command=str(experiment["baseline_command"]),
-            candidate_command=str(experiment["candidate_command"]),
-            metric=str(experiment["metric"]),
-            threshold=str(experiment["threshold"]),
+            baseline_command=str(experiment.get("baseline_command", "")),
+            candidate_command=str(experiment.get("candidate_command", "")),
+            metric=str(experiment.get("metric", "")),
+            threshold=str(experiment.get("threshold", "")),
             rationale=str(experiment["rationale"]),
         ),
         notification_decision=NotificationDecision(
