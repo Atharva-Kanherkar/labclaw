@@ -23,6 +23,7 @@
 - `test_e2b_runner_handles_timeout` - timeout errors become failed run results.
 - `test_e2b_runner_handles_malformed_metric_json` - bad metric output fails cleanly.
 - `test_live_e2b_factory_requires_api_key` - live factory construction fails clearly without `E2B_API_KEY`.
+- `test_live_e2b_smoke_when_credentials_available` - optional live smoke runs only when `E2B_API_KEY` is present.
 
 ## Integration / Functional Tests
 
@@ -42,5 +43,6 @@ With credentials and the optional dependency installed:
 
 ```bash
 export E2B_API_KEY=...
+export E2B_TEMPLATE=labclaw-ml-runner  # optional override
 python -m pytest tests/test_e2b_runner.py
 ```
