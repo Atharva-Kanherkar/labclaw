@@ -10,6 +10,7 @@ dev = ["pytest>=8.0"]
 
 [project.scripts]
 labclaw-read = "labclaw.multimodal_reader:main"
+labclaw-bot = "labclaw.telegram:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
