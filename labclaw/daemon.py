@@ -50,6 +50,7 @@ class HeartbeatDaemon:
             try:
                 self.handlers.get(stage, noop_stage_handler)(run_id)
             except Exception as exc:
+                # TODO(#22): redact provider secrets before real handlers persist errors.
                 self.ledger.record_stage(run_id, stage, "failed", error=str(exc))
                 self.ledger.update_heartbeat(run_id, "failed")
                 raise
@@ -87,10 +88,19 @@ def main(argv: list[str] | None = None) -> None:
         default=Path(".labclaw") / "run-ledger.jsonl",
         help="Path to the local JSONL run ledger.",
     )
-    parser.add_argument("--mission", default=DEFAULT_MISSION, help="Standing ML mission text.")
+    parser.add_argument("--mission", help="Standing ML mission text.")
     parser.add_argument("--mission-file", type=Path, help="Read standing mission text from a file.")
     parser.add_argument("--json", action="store_true", help="Print JSON output.")
-    args = parser.parse_args(argv)
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    if raw_args[:1] == ["daemon"]:
+        raw_args = raw_args[1:]
+    mission_supplied = any(
+        arg in ("--mission", "--mission-file")
+        or arg.startswith("--mission=")
+        or arg.startswith("--mission-file=")
+        for arg in raw_args
+    )
+    args = parser.parse_args(raw_args)
 
     if not args.once:
         print("Error: only --once mode is implemented for the MVP daemon.", file=sys.stderr)
@@ -98,7 +108,11 @@ def main(argv: list[str] | None = None) -> None:
 
     ledger = JsonlRunLedger(args.ledger)
     daemon = HeartbeatDaemon(ledger)
-    mission = load_mission(args.mission_file, args.mission)
+    mission = DEFAULT_MISSION
+    if args.resume and mission_supplied:
+        print("Warning: --mission and --mission-file are ignored when resuming a run.", file=sys.stderr)
+    if not args.resume:
+        mission = load_mission(args.mission_file, args.mission or DEFAULT_MISSION)
     try:
         run_id = daemon.run_once(mission=mission, resume=args.resume)
     except Exception as exc:

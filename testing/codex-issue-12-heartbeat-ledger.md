@@ -13,17 +13,21 @@
 
 - `test_run_ledger_creates_heartbeat` — new heartbeat has mission, status, timestamps, and stage records.
 - `test_run_ledger_records_stage_failure` — failed stage stores error details and marks the heartbeat failed.
+- `test_run_ledger_writes_schema_version_and_tolerates_old_rows` — ledger rows carry a schema version and older rows still load.
+- `test_run_ledger_rejects_malformed_jsonl` — malformed JSONL fails with a clear `ValueError`.
 - `test_heartbeat_daemon_successful_once_run` — default stages all succeed with local no-op handlers.
+- `test_heartbeat_daemon_rejects_unknown_resume_id` — unknown resume IDs fail clearly.
 - `test_heartbeat_daemon_resumes_failed_run` — resume targets an existing run and completes the failed stage.
 
 ## Integration / Functional Tests
 
-- CLI invocation with `--once --ledger PATH` exits zero and writes JSONL records.
-- CLI invocation with `--once --resume RUN_ID --ledger PATH` exits zero when a retryable run exists.
+- CLI invocation with `labclaw daemon --once --ledger PATH` exits zero and writes JSONL records.
+- CLI invocation with `labclaw daemon --once --resume RUN_ID --ledger PATH` exits zero when a retryable run exists.
+- CLI resume warns when `--mission` or `--mission-file` is supplied, because resume keeps the original mission.
 
 ## Smoke Tests
 
-- `python -m labclaw.daemon --once --ledger /tmp/labclaw-ledger.jsonl` creates a run without external credentials.
+- `labclaw daemon --once --ledger /tmp/labclaw-ledger.jsonl` creates a run without external credentials.
 
 ## E2E Tests
 
@@ -32,6 +36,6 @@ N/A — issue #12 only creates the local heartbeat spine. Full source-to-report 
 ## Manual / cURL Tests
 
 ```bash
-python -m labclaw.daemon --once --ledger /tmp/labclaw-ledger.jsonl
-python -m labclaw.daemon --once --resume RUN_ID --ledger /tmp/labclaw-ledger.jsonl
+labclaw daemon --once --ledger /tmp/labclaw-ledger.jsonl
+labclaw daemon --once --resume RUN_ID --ledger /tmp/labclaw-ledger.jsonl
 ```

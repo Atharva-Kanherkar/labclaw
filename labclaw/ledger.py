@@ -8,7 +8,7 @@ changing the daemon.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
@@ -16,6 +16,7 @@ from uuid import uuid4
 
 DEFAULT_STAGES = ["scout", "cluster", "read", "experiment", "eval", "report"]
 DEFAULT_MISSION = "Watch ML/code research and report only measured evidence."
+SCHEMA_VERSION = 1
 
 
 def utc_now() -> str:
@@ -29,6 +30,7 @@ class HeartbeatRun:
     status: str
     created_at: str
     updated_at: str
+    schema_version: int = SCHEMA_VERSION
 
 
 @dataclass(frozen=True)
@@ -42,6 +44,7 @@ class StageRun:
     started_at: str | None = None
     finished_at: str | None = None
     error: str | None = None
+    schema_version: int = SCHEMA_VERSION
 
 
 class RunLedger(Protocol):
@@ -166,11 +169,16 @@ class JsonlRunLedger:
                     raise ValueError(f"Malformed ledger JSON on line {line_number}") from exc
                 record_type = record.pop("record_type", None)
                 if record_type == "heartbeat":
-                    heartbeat = HeartbeatRun(**record)
+                    heartbeat = dataclass_from_record(HeartbeatRun, record)
                     heartbeats[heartbeat.run_id] = heartbeat
                 elif record_type == "stage":
-                    stage = StageRun(**record)
+                    stage = dataclass_from_record(StageRun, record)
                     stages[(stage.run_id, stage.stage)] = stage
                 else:
                     raise ValueError(f"Unknown ledger record type on line {line_number}: {record_type}")
         return heartbeats, stages
+
+
+def dataclass_from_record(record_class: type[HeartbeatRun] | type[StageRun], record: dict[str, Any]):
+    allowed_fields = {field.name for field in fields(record_class)}
+    return record_class(**{key: value for key, value in record.items() if key in allowed_fields})

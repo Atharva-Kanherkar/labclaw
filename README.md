@@ -99,11 +99,14 @@ Issue #12 adds the local run spine for the 24/7 lab loop. A single heartbeat
 creates a run id and records stage transitions to an append-only JSONL ledger:
 
 ```bash
-python -m labclaw.daemon --once --ledger /tmp/labclaw-ledger.jsonl
+labclaw daemon --once --ledger /tmp/labclaw-ledger.jsonl
 ```
 
 Resume a failed or pending run:
 
 ```bash
-python -m labclaw.daemon --once --resume RUN_ID --ledger /tmp/labclaw-ledger.jsonl
+labclaw daemon --once --resume RUN_ID --ledger /tmp/labclaw-ledger.jsonl
 ```
+
+For editable checkouts without installed console scripts, use
+`python -m labclaw.daemon daemon ...` with the same flags.
