@@ -1,15 +1,23 @@
 from pathlib import Path
+import threading
+import time
 
 import pytest
 
+import labclaw.multimodal_reader as reader
 from labclaw.multimodal_reader import (
     ClaimCard,
     ReaderResult,
+    ReaderSource,
+    SourceRecord,
     build_user_content,
     format_human_result,
     extract_with_gemma,
     load_json_object,
     parse_local_fixture,
+    read_source_record,
+    read_source_text,
+    read_sources,
 )
 
 
@@ -196,6 +204,113 @@ python bench.py --scheduler
     assert "1.4x" in card.benchmark_numbers
     assert card.code_hooks == ["python bench.py --scheduler"]
     assert card.is_testable is True
+
+
+def test_read_source_text_accepts_in_memory_source_title() -> None:
+    result = read_source_text(
+        """This repo claims decoding is 1.8x faster.
+
+```bash
+python bench.py --decode
+```""",
+        title="Scout Raw Text",
+        use_gemma=False,
+    )
+
+    assert result.source == {"title": "Scout Raw Text", "path": None}
+    assert result.cards[0].main_claim == "This repo claims decoding is 1.8x faster."
+    assert result.cards[0].benchmark_numbers == ["1.8x"]
+    assert result.cards[0].code_hooks == ["python bench.py --decode"]
+
+
+def test_source_record_figures_are_attached_for_gemma(tmp_path: Path) -> None:
+    figure = tmp_path / "chart.png"
+    figure.write_bytes(b"png-data")
+    record = SourceRecord(
+        source_id="src-1",
+        kind="paper",
+        title="Scout Record",
+        raw_text="This paper claims kernels improve throughput by 1.4x.",
+        figures=[{"alt_text": "Throughput chart", "path": str(figure)}],
+    )
+    client = FakeClient()
+
+    result = read_source_record(record, client=client)
+    payload = client.chat.completions.calls[0]["messages"][1]["content"]
+
+    assert result.source["title"] == "Scout Record"
+    assert [part["type"] for part in payload] == ["text", "image_url"]
+    assert payload[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_read_sources_preserves_order_and_isolates_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_read_source_text(content: str, **kwargs) -> ReaderResult:
+        if kwargs["title"] == "Broken":
+            raise ValueError("bad source")
+        return ReaderResult(
+            source={"title": kwargs["title"], "path": None},
+            cards=[
+                ClaimCard(
+                    id=f"claim-{kwargs['title'].lower()}",
+                    main_claim=content,
+                    figures=[],
+                    benchmark_numbers=[],
+                    code_hooks=[],
+                    is_testable=False,
+                    evidence_needed=[],
+                )
+            ],
+        )
+
+    monkeypatch.setattr(reader, "read_source_text", fake_read_source_text)
+
+    results = read_sources(
+        [
+            ReaderSource(source_id="a", title="First", content="first"),
+            ReaderSource(source_id="b", title="Broken", content="broken"),
+            ReaderSource(source_id="c", title="Third", content="third"),
+        ],
+        max_workers=2,
+        use_gemma=False,
+    )
+
+    assert [result.source_id for result in results] == ["a", "b", "c"]
+    assert [result.ok for result in results] == [True, False, True]
+    assert results[0].card_count == 1
+    assert results[1].error == "ValueError: bad source"
+    assert results[2].result is not None
+
+
+def test_read_sources_respects_configured_concurrency(monkeypatch: pytest.MonkeyPatch) -> None:
+    lock = threading.Lock()
+    active = 0
+    max_seen = 0
+
+    def slow_read_source_text(content: str, **kwargs) -> ReaderResult:
+        nonlocal active, max_seen
+        with lock:
+            active += 1
+            max_seen = max(max_seen, active)
+        time.sleep(0.02)
+        with lock:
+            active -= 1
+        return ReaderResult(
+            source={"title": kwargs["title"], "path": None},
+            cards=[],
+        )
+
+    monkeypatch.setattr(reader, "read_source_text", slow_read_source_text)
+
+    results = read_sources(
+        [ReaderSource(source_id=str(index), title=f"Source {index}", content="claim") for index in range(5)],
+        max_workers=2,
+        use_gemma=False,
+    )
+
+    assert len(results) == 5
+    assert max_seen <= 2
+    assert all(result.ok for result in results)
+    assert all(result.elapsed_ms > 0 for result in results)
 
 
 def test_load_json_object_rejects_none_content() -> None:

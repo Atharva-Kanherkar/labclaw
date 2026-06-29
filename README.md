@@ -36,6 +36,11 @@ The live reader follows Cerebras image-input constraints:
 - max 10 MB total image payload
 - response uses strict JSON schema output
 
+For batch live reads, prefer `read_sources(..., client_factory=...)` so each
+worker gets its own Cerebras client. Passing one shared `client=` across worker
+threads is allowed for tests and custom adapters, but the Cerebras SDK
+thread-safety is not assumed.
+
 ## Telegram bot
 
 LabClaw can talk to you on Telegram — both directions. It sends pings
