@@ -90,6 +90,7 @@ class PipelineResult:
     critic_verdict: dict[str, Any]
     report: dict[str, Any]
     reportable: bool
+    demo_proof: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -104,6 +105,7 @@ class PipelineResult:
             "critic_verdict": self.critic_verdict,
             "report": self.report,
             "reportable": self.reportable,
+            "demo_proof": self.demo_proof,
         }
 
 
@@ -219,23 +221,23 @@ class LabPipeline:
             critic_verdict=verdict.to_dict(),
             report=report.to_dict(),
             reportable=verdict.reportable,
+            demo_proof={
+                "started_at": started_at,
+                "finished_at": utc_now(),
+                "live_cerebras_used": read_proof.get("mode") == "live_cerebras",
+                "reader_proof": read_proof,
+                "experiment_proof": experiment_proof,
+                "selected_source_id": source.source_id,
+                "transparency": {
+                    "scout": "Recorded arXiv/GitHub fixtures (offline, deterministic)",
+                    "reader": read_proof.get("label", "unknown"),
+                    "experiment": experiment_proof.get("label", "unknown"),
+                    "eval": "Evidence critic gates reportable output",
+                },
+            },
         )
         payload = result.to_dict()
         payload["capabilities"] = demo_capabilities()
-        payload["demo_proof"] = {
-            "started_at": started_at,
-            "finished_at": utc_now(),
-            "live_cerebras_used": read_proof.get("mode") == "live_cerebras",
-            "reader_proof": read_proof,
-            "experiment_proof": experiment_proof,
-            "selected_source_id": source.source_id,
-            "transparency": {
-                "scout": "Recorded arXiv/GitHub fixtures (offline, deterministic)",
-                "reader": read_proof.get("label", "unknown"),
-                "experiment": experiment_proof.get("label", "unknown"),
-                "eval": "Evidence critic gates reportable output",
-            },
-        }
         self._persist_payload(result.run_id, payload)
         return result
 
