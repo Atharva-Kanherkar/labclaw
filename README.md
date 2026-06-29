@@ -186,3 +186,28 @@ spec = spec_from_pi_proposal({
 })
 result = default_registry().run(spec)
 ```
+
+## E2B experiment runner
+
+Issue #17 adds the bounded sandbox execution layer. The runner consumes an
+`ExperimentSpec`, uploads files, runs setup/baseline/candidate commands in an
+E2B-style sandbox, captures command logs, parses metric JSON, downloads declared
+artifacts, and writes local run artifacts.
+
+Tests use a fake sandbox. Live E2B use is optional:
+
+```bash
+pip install "labclaw[e2b]"
+export E2B_API_KEY=...
+export E2B_TEMPLATE=labclaw-ml-runner  # optional override for live smoke
+```
+
+Baseline and candidate commands should print JSON containing the requested
+metric, for example:
+
+```json
+{"metrics": {"tokens_per_second": 55}}
+```
+
+The runner rejects unbounded shell control tokens and only runs the setup,
+baseline, and candidate commands carried by a bounded `ExperimentSpec`.

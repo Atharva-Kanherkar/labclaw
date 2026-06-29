@@ -8,6 +8,7 @@ dependencies = ["cerebras-cloud-sdk>=1.50.0"]
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 gemini = ["google-genai>=1.0.0"]
+e2b = ["e2b>=1.0.0"]
 
 [project.scripts]
 labclaw-read = "labclaw.multimodal_reader:main"
