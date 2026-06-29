@@ -8,6 +8,7 @@ import json
 import mimetypes
 import os
 import re
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -186,9 +187,10 @@ def build_user_content(
         }
     ]
 
+    image_count = 0
     image_payload_bytes = 0
     for figure in figure_refs:
-        if len(payload) > MAX_IMAGES:
+        if image_count >= MAX_IMAGES:
             break
         image_path = resolve_figure_path(source_path, figure["path"])
         if not image_path or not image_path.exists():
@@ -198,8 +200,9 @@ def build_user_content(
             continue
         image_size = image_path.stat().st_size
         if image_payload_bytes + image_size > MAX_IMAGE_PAYLOAD_BYTES:
-            break
+            continue
         image_payload_bytes += image_size
+        image_count += 1
         payload.append(
             {
                 "type": "image_url",
@@ -230,12 +233,20 @@ def encode_image_data_uri(image_path: Path) -> str:
     return f"data:{mime_type};base64,{encoded}"
 
 
-def load_json_object(raw: str) -> dict[str, Any]:
+def load_json_object(raw: str | None) -> dict[str, Any]:
+    if not raw:
+        raise ValueError("Gemma returned no message content.")
     text = raw.strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
-    return json.loads(text)
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Gemma returned malformed JSON.") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("Gemma JSON response must be an object.")
+    return parsed
 
 
 def result_from_dict(payload: dict[str, Any]) -> ReaderResult:
@@ -319,6 +330,23 @@ def to_dict(result: ReaderResult) -> dict[str, Any]:
     return asdict(result)
 
 
+def format_human_result(result: ReaderResult) -> str:
+    lines = [f"# {result.source['title']}"]
+    if not result.cards:
+        lines.append("No claims extracted.")
+        return "\n".join(lines)
+
+    for index, card in enumerate(result.cards, start=1):
+        if len(result.cards) > 1:
+            lines.append("")
+            lines.append(f"## Claim {index}")
+        lines.append(f"Claim: {card.main_claim or 'none'}")
+        lines.append(f"Figures: {len(card.figures)}")
+        lines.append(f"Benchmarks: {', '.join(card.benchmark_numbers) or 'none'}")
+        lines.append(f"Code hooks: {len(card.code_hooks)}")
+    return "\n".join(lines)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Extract LabClaw multimodal claim cards with Gemma.")
     parser.add_argument("source", type=Path)
@@ -326,17 +354,16 @@ def main() -> None:
     parser.add_argument("--local-fixture", action="store_true", help="Skip Gemma and use deterministic local parsing.")
     args = parser.parse_args()
 
-    result = read_source(args.source, use_gemma=not args.local_fixture)
+    try:
+        result = read_source(args.source, use_gemma=not args.local_fixture)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
     if args.json:
         print(json.dumps(to_dict(result), indent=2))
         return
 
-    card = result.cards[0]
-    print(f"# {result.source['title']}")
-    print(f"Claim: {card.main_claim}")
-    print(f"Figures: {len(card.figures)}")
-    print(f"Benchmarks: {', '.join(card.benchmark_numbers) or 'none'}")
-    print(f"Code hooks: {len(card.code_hooks)}")
+    print(format_human_result(result))
 
 
 if __name__ == "__main__":
