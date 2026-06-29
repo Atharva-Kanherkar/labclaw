@@ -10,7 +10,7 @@ from labclaw.eval_harness import ExperimentSpec, MetricResult
 
 VALID_VERDICTS = frozenset({"reproduced", "refuted", "inconclusive", "rerun_needed"})
 DEFAULT_MIN_SAMPLE_SIZE = 10
-DEFAULT_MIN_CONFIDENCE_REPORTABLE = 0.5
+DEFAULT_MIN_CONFIDENCE_REPORTABLE = 0.9
 FLAKY_FAILURE_PATTERNS = (
     re.compile(r"timed out", re.IGNORECASE),
     re.compile(r"flaky", re.IGNORECASE),
@@ -103,7 +103,7 @@ class EvidenceCritic:
                 objections.append(failure_reason)
                 return self._finalize(
                     "rerun_needed",
-                    confidence=min(confidence, 0.3),
+                    confidence=0.3,
                     metric_delta=metric_delta,
                     objections=objections,
                 )
@@ -116,7 +116,7 @@ class EvidenceCritic:
                 objections.append(failure_reason)
                 return self._finalize(
                     "rerun_needed",
-                    confidence=min(confidence, 0.3),
+                    confidence=0.3,
                     metric_delta=metric_delta,
                     objections=objections,
                 )
@@ -125,62 +125,59 @@ class EvidenceCritic:
 
         if self.require_command_log and not evidence.command_log:
             objections.append("missing command log")
+        elif not evidence.command_log:
             confidence -= 0.1
 
         missing_artifacts = missing_required_artifacts(evidence, repro)
         if missing_artifacts:
-            for artifact in missing_artifacts:
-                objections.append(f"missing required artifact: {artifact}")
             if self.require_artifacts:
+                for artifact in missing_artifacts:
+                    objections.append(f"missing required artifact: {artifact}")
+            else:
                 confidence -= 0.2
 
         if repro.random_seed is None:
-            objections.append("missing random seed")
             confidence -= 0.15
         if repro.sample_size is not None and repro.sample_size < self.min_sample_size:
-            objections.append(
-                f"sample size below minimum ({repro.sample_size} < {self.min_sample_size})"
-            )
             confidence -= 0.25
         if repro.run_count < 2 and repro.flaky:
             objections.append("flaky run requires rerun")
             return self._finalize(
                 "rerun_needed",
-                confidence=min(confidence, 0.3),
+                confidence=0.3,
+                metric_delta=metric_delta,
+                objections=objections,
+            )
+
+        if objections:
+            return self._finalize(
+                "inconclusive",
+                confidence=confidence,
                 metric_delta=metric_delta,
                 objections=objections,
             )
 
         if metric.improved:
-            if objections:
-                return self._finalize(
-                    "inconclusive",
-                    confidence=max(confidence, 0.0),
-                    metric_delta=metric_delta,
-                    objections=objections,
-                )
             return self._finalize(
                 "reproduced",
-                confidence=max(confidence, 0.0),
+                confidence=confidence,
                 metric_delta=metric_delta,
                 objections=objections,
             )
 
         if metric.status == "worse":
-            if not objections:
-                objections.append("candidate metric is worse than baseline")
+            objections.append("candidate metric is worse than baseline")
             return self._finalize(
                 "refuted",
-                confidence=max(confidence, 0.7),
+                confidence=confidence,
                 metric_delta=metric_delta,
                 objections=objections,
             )
 
-        if not metric.improved:
-            objections.append("metric delta did not clear threshold")
+        objections.append("metric delta did not clear threshold")
         return self._finalize(
-            "refuted",
-            confidence=max(confidence, 0.6),
+            "inconclusive",
+            confidence=confidence,
             metric_delta=metric_delta,
             objections=objections,
         )
@@ -241,10 +238,16 @@ def missing_required_artifacts(
     evidence: EvidenceInput,
     reproducibility: ReproducibilityContext,
 ) -> list[str]:
-    required = list(evidence.spec.artifacts)
-    if evidence.metric_result is not None:
-        required.extend(evidence.metric_result.artifacts)
-    required.extend(reproducibility.required_artifacts)
+    required: list[str] = []
+    seen: set[str] = set()
+    for path in (
+        *evidence.spec.artifacts,
+        *(evidence.metric_result.artifacts if evidence.metric_result is not None else ()),
+        *reproducibility.required_artifacts,
+    ):
+        if path not in seen:
+            seen.add(path)
+            required.append(path)
     if not required:
         return []
     available = set((evidence.artifact_paths or {}).keys())

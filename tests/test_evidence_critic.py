@@ -100,7 +100,7 @@ def test_critic_flags_malformed_metric_name_mismatch() -> None:
     assert any("metric name mismatch" in objection for objection in verdict.blocking_objections)
 
 
-def test_critic_refutes_threshold_failure() -> None:
+def test_critic_marks_threshold_failure_inconclusive() -> None:
     verdict = EvidenceCritic().evaluate(
         evidence(
             metric_result=metric_result(
@@ -112,7 +112,7 @@ def test_critic_refutes_threshold_failure() -> None:
         )
     )
 
-    assert verdict.verdict == "refuted"
+    assert verdict.verdict == "inconclusive"
     assert verdict.reportable is False
     assert "metric delta did not clear threshold" in verdict.blocking_objections
 
@@ -175,14 +175,24 @@ def test_critic_blocks_report_without_required_artifacts() -> None:
     assert any("missing required artifact" in objection for objection in verdict.blocking_objections)
 
 
+def test_critic_allows_reproduced_when_artifacts_not_required() -> None:
+    verdict = EvidenceCritic(require_artifacts=False).evaluate(evidence(artifact_paths={}))
+
+    assert verdict.verdict == "reproduced"
+    assert verdict.reportable is False
+    assert verdict.confidence == 0.8
+    assert verdict.blocking_objections == []
+
+
 def test_critic_blocks_report_without_seed() -> None:
     verdict = EvidenceCritic().evaluate(
         evidence(reproducibility=ReproducibilityContext(random_seed=None, sample_size=100))
     )
 
-    assert verdict.verdict == "inconclusive"
+    assert verdict.verdict == "reproduced"
     assert verdict.reportable is False
-    assert "missing random seed" in verdict.blocking_objections
+    assert verdict.confidence == 0.85
+    assert verdict.blocking_objections == []
 
 
 def test_critic_blocks_report_for_tiny_sample() -> None:
@@ -190,9 +200,20 @@ def test_critic_blocks_report_for_tiny_sample() -> None:
         evidence(reproducibility=ReproducibilityContext(random_seed=7, sample_size=5))
     )
 
-    assert verdict.verdict == "inconclusive"
+    assert verdict.verdict == "reproduced"
     assert verdict.reportable is False
-    assert any("sample size below minimum" in objection for objection in verdict.blocking_objections)
+    assert verdict.confidence == 0.75
+    assert verdict.blocking_objections == []
+
+
+def test_min_confidence_reportable_gates_reproduced_verdict() -> None:
+    verdict = EvidenceCritic(min_confidence_reportable=0.95).evaluate(
+        evidence(reproducibility=ReproducibilityContext(random_seed=None, sample_size=100))
+    )
+
+    assert verdict.verdict == "reproduced"
+    assert verdict.confidence == 0.85
+    assert verdict.reportable is False
 
 
 def test_critic_evaluates_harness_output_end_to_end() -> None:

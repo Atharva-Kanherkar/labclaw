@@ -235,5 +235,5 @@ verdict = EvidenceCritic().evaluate(
 ```
 
 Only `reproduced` verdicts with no blocking objections and sufficient confidence
-are `reportable`. Threshold failures and worse candidates are `refuted`; flaky
-timeouts and missing evidence become `rerun_needed` or `inconclusive`.
+are `reportable`. Worse candidates are `refuted`; below-threshold null results are
+`inconclusive`; flaky timeouts become `rerun_needed`.
