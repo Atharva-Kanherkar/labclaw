@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <id>http://arxiv.org/abs/2406.01234v2</id>
+    <updated>2024-06-03T10:00:00Z</updated>
+    <published>2024-06-02T09:00:00Z</published>
+    <title>Faster Small Language Model Pretraining with Cache-Aware Kernels</title>
+    <summary>We show a training recipe for a small language model that improves
+    tokens/sec via cache-aware CUDA kernels while matching validation loss.</summary>
+    <category term="cs.LG"/>
+    <category term="cs.CL"/>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2406.05678v1</id>
+    <updated>2024-06-04T10:00:00Z</updated>
+    <published>2024-06-04T08:00:00Z</published>
+    <title>A New Long Context Method Using RoPE Scaling to 128k</title>
+    <summary>A long context approach extending the context window to 128k with
+    rope position encoding and a sliding window attention variant.</summary>
+    <category term="cs.CL"/>
+  </entry>
+</feed>
