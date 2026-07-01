@@ -240,6 +240,7 @@ class LabClawBot:
                 "Commands:\n"
                 "/ping - check I'm alive\n"
                 "/read [--local] <path> - extract claim cards from a source file\n"
+                "/verify [--local] <arxiv-url|path|claim text> - run claim verification\n"
                 "/whoami - show your chat id\n"
                 "/help - this message"
             )
@@ -252,6 +253,14 @@ class LabClawBot:
         def _whoami(args: str, message: dict) -> str:
             chat = message.get("chat", {})
             return f"chat_id: {chat.get('id', 'unknown')}"
+
+        @router.register("verify")
+        def _verify(args: str, message: dict) -> str:
+            return self._handle_verify(args)
+
+        @router.register("check")
+        def _check(args: str, message: dict) -> str:
+            return self._handle_verify(args)
 
         @router.register("read")
         def _read(args: str, message: dict) -> str:
@@ -272,19 +281,50 @@ class LabClawBot:
             # a live Gemma extraction blocks all other updates and pauses polling
             # until it returns. Acceptable for a single-user MVP; move to a
             # worker/queue if concurrency is needed.
-            use_gemma = not force_local and bool(os.environ.get("CEREBRAS_API_KEY"))
+            use_llm = not force_local and bool(os.environ.get("OPENAI_API_KEY"))
             try:
-                result = read_source(source, use_gemma=use_gemma)
+                result = read_source(source, use_llm=use_llm)
             except RuntimeError as exc:
-                if not use_gemma:
+                if not use_llm:
                     raise
-                # Cerebras SDK/key missing -- fall back so /read still works.
-                result = read_source(source, use_gemma=False)
+                result = read_source(source, use_llm=False)
                 note = f"(live reader unavailable: {exc}; used offline parser)\n"
                 return note + format_human_result(result)
             return format_human_result(result)
         except Exception as exc:  # Surface reader errors to the chat, don't crash.
             return f"Read failed: {exc}"
+
+    def _handle_verify(self, args: str) -> str:
+        force_local, payload = self._parse_read_args(args)
+        if not payload:
+            return "Usage: /verify [--local] <arxiv-url|file-path|claim text>"
+        try:
+            from labclaw.pipeline import LabPipeline
+
+            pipeline = LabPipeline(Path("labclaw_data"), fixture_mode=force_local)
+            if force_local or Path(payload).exists():
+                from labclaw.verify import resolve_input
+
+                source = resolve_input(payload)
+                result = pipeline.run(source=source)
+            else:
+                result = pipeline.verify(payload)
+            verdict = result.critic_verdict.get("verdict", "unknown")
+            reportable = result.reportable
+            claim = result.claim.get("main_claim", "n/a")
+            metric = result.metric_result
+            baseline = metric.get("baseline", "n/a")
+            candidate = metric.get("candidate", "n/a")
+            lines = [
+                f"LabClaw verify · {verdict}",
+                f"Reportable: {reportable}",
+                f"Claim: {claim[:200]}",
+                f"Metric: {baseline} → {candidate}",
+                f"Run: {result.run_id}",
+            ]
+            return "\n".join(lines)
+        except Exception as exc:
+            return f"Verify failed: {exc}"
 
     @staticmethod
     def _parse_read_args(args: str) -> tuple[bool, str]:

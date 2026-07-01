@@ -97,7 +97,7 @@ python bench.py --scheduler
     call = client.chat.completions.calls[0]
     card = result.cards[0]
 
-    assert call["model"] == "gemma-4-31b"
+    assert call["model"] == "gpt-4o-mini"
     assert call["response_format"]["type"] == "json_schema"
     assert call["response_format"]["json_schema"]["strict"] is True
     assert call["temperature"] == 0.2

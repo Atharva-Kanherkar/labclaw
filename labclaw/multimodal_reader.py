@@ -1,4 +1,4 @@
-"""Extract testable ML/code claim cards with Gemma on Cerebras."""
+"""Extract testable ML/code claim cards with OpenAI multimodal models."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-MODEL = "gemma-4-31b"
+MODEL = "gpt-4o-mini"
 MAX_IMAGES = 5
 MAX_IMAGE_PAYLOAD_BYTES = 10 * 1024 * 1024
 SUPPORTED_IMAGE_TYPES = {"image/png", "image/jpeg"}
@@ -152,12 +152,15 @@ class ReaderSourceResult:
 def read_source(
     source_path: Path,
     *,
-    use_gemma: bool = True,
+    use_llm: bool = True,
+    use_gemma: bool | None = None,
     client: Any | None = None,
 ) -> ReaderResult:
+    if use_gemma is not None:
+        use_llm = use_gemma
     content = source_path.read_text(encoding="utf-8")
-    if use_gemma:
-        return extract_with_gemma(content, source_path=source_path, client=client)
+    if use_llm:
+        return extract_with_llm(content, source_path=source_path, client=client)
     return parse_local_fixture(content, source_path=source_path)
 
 
@@ -167,12 +170,15 @@ def read_source_text(
     title: str = "untitled-source",
     source_path: Path | None = None,
     figures: list[dict[str, Any]] | None = None,
-    use_gemma: bool = True,
+    use_llm: bool = True,
+    use_gemma: bool | None = None,
     client: Any | None = None,
 ) -> ReaderResult:
     """Read source text supplied by scouts without requiring a file on disk."""
-    if use_gemma:
-        return extract_with_gemma(
+    if use_gemma is not None:
+        use_llm = use_gemma
+    if use_llm:
+        return extract_with_llm(
             content,
             source_path=source_path,
             source_title=title,
@@ -186,13 +192,15 @@ def read_source_text(
 def read_source_record(
     record: SourceRecord,
     *,
-    use_gemma: bool = True,
+    use_llm: bool = True,
+    use_gemma: bool | None = None,
     client: Any | None = None,
 ) -> ReaderResult:
     return read_source_text(
         record.raw_text,
         title=record.title,
         figures=record.figures,
+        use_llm=use_llm,
         use_gemma=use_gemma,
         client=client,
     )
@@ -202,10 +210,13 @@ def read_sources(
     sources: Sequence[SourceRecord | ReaderSource | Path],
     *,
     max_workers: int = 4,
-    use_gemma: bool = True,
+    use_llm: bool = True,
+    use_gemma: bool | None = None,
     client: Any | None = None,
     client_factory: Callable[[], Any] | None = None,
 ) -> list[ReaderSourceResult]:
+    if use_gemma is not None:
+        use_llm = use_gemma
     if max_workers < 1:
         raise ValueError("max_workers must be at least 1.")
 
@@ -218,7 +229,7 @@ def read_sources(
         started = time.perf_counter()
         try:
             source_client = client_factory() if client_factory else client
-            result = read_source_input(source, use_gemma=use_gemma, client=source_client)
+            result = read_source_input(source, use_llm=use_llm, client=source_client)
         except Exception as exc:  # noqa: BLE001 - failure isolation is the point of the batch API.
             elapsed_ms = (time.perf_counter() - started) * 1000
             return index, ReaderSourceResult(
@@ -253,24 +264,24 @@ def read_sources(
 def read_source_input(
     source: SourceRecord | ReaderSource | Path,
     *,
-    use_gemma: bool,
+    use_llm: bool,
     client: Any | None,
 ) -> ReaderResult:
     if isinstance(source, SourceRecord):
-        return read_source_record(source, use_gemma=use_gemma, client=client)
+        return read_source_record(source, use_llm=use_llm, client=client)
     if isinstance(source, ReaderSource):
         return read_source_text(
             source.content,
             title=source.title,
             source_path=source.path,
             figures=source.figures,
-            use_gemma=use_gemma,
+            use_llm=use_llm,
             client=client,
         )
-    return read_source(Path(source), use_gemma=use_gemma, client=client)
+    return read_source(Path(source), use_llm=use_llm, client=client)
 
 
-def extract_with_gemma(
+def extract_with_llm(
     content: str,
     *,
     source_path: Path | None = None,
@@ -278,7 +289,7 @@ def extract_with_gemma(
     figure_refs: list[dict[str, Any]] | None = None,
     client: Any | None = None,
 ) -> ReaderResult:
-    client = client or cerebras_client()
+    client = client or llm_client()
     figure_refs = normalize_figure_refs(figure_refs or markdown_figures(content))
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -315,19 +326,27 @@ def extract_with_gemma(
     return result
 
 
-def cerebras_client() -> Any:
+def llm_client() -> Any:
     try:
-        from cerebras.cloud.sdk import Cerebras
+        from openai import OpenAI
     except ImportError as exc:
         raise RuntimeError(
-            "Install the Cerebras SDK with `pip install cerebras-cloud-sdk` "
+            "Install the OpenAI SDK with `pip install openai` "
             "or run with `--local-fixture` for offline tests."
         ) from exc
 
-    api_key = os.environ.get("CEREBRAS_API_KEY")
+    api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        raise RuntimeError("Set CEREBRAS_API_KEY or run with `--local-fixture`.")
-    return Cerebras(api_key=api_key)
+        raise RuntimeError("Set OPENAI_API_KEY or run with `--local-fixture`.")
+    return OpenAI(api_key=api_key)
+
+
+def cerebras_client() -> Any:
+    """Deprecated alias kept for older imports."""
+    return llm_client()
+
+
+extract_with_gemma = extract_with_llm
 
 
 def build_user_content(
@@ -455,7 +474,7 @@ def encode_image_data_uri(image_path: Path) -> str:
 
 def load_json_object(raw: str | None) -> dict[str, Any]:
     if not raw:
-        raise ValueError("Gemma returned no message content.")
+        raise ValueError("OpenAI reader returned no message content.")
     text = raw.strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
@@ -463,9 +482,9 @@ def load_json_object(raw: str | None) -> dict[str, Any]:
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise ValueError("Gemma returned malformed JSON.") from exc
+        raise ValueError("OpenAI reader returned malformed JSON.") from exc
     if not isinstance(parsed, dict):
-        raise ValueError("Gemma JSON response must be an object.")
+        raise ValueError("OpenAI reader JSON response must be an object.")
     return parsed
 
 
@@ -503,7 +522,7 @@ def result_from_dict(payload: dict[str, Any]) -> ReaderResult:
 
 
 def parse_local_fixture(content: str, *, source_path: Path | None = None) -> ReaderResult:
-    """Offline fallback for deterministic tests; production extraction uses Gemma."""
+    """Offline fallback for deterministic tests; production extraction uses OpenAI."""
     title = next((line.removeprefix("# ").strip() for line in content.splitlines() if line.startswith("# ")), "untitled-source")
     figures = [
         FigureReference(
@@ -572,14 +591,14 @@ def format_human_result(result: ReaderResult) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Extract LabClaw multimodal claim cards with Gemma.")
+    parser = argparse.ArgumentParser(description="Extract LabClaw multimodal claim cards with OpenAI.")
     parser.add_argument("source", type=Path)
     parser.add_argument("--json", action="store_true", help="Print full JSON output.")
     parser.add_argument("--local-fixture", action="store_true", help="Skip Gemma and use deterministic local parsing.")
     args = parser.parse_args()
 
     try:
-        result = read_source(args.source, use_gemma=not args.local_fixture)
+        result = read_source(args.source, use_llm=not args.local_fixture)
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc

@@ -21,19 +21,19 @@ It runs out of the box in **fixture mode** (no API keys, fully deterministic) so
 LabClaw is a pipeline of small, independently-testable stages wired into a heartbeat loop:
 
 ```
-  Scouts ──▶ Clustering ──▶ Multimodal Reader ──▶ Gemini PI ──▶ Eval Harness ──▶ E2B Runner ──▶ Evidence Critic ──▶ Report / Telegram
- (arXiv,                    (Gemma via         (strategic     (defines what    (bounded         (truth gate:
-  GitHub)                    Cerebras —         orchestrator:  "improved"       sandbox          reproduced?
-                             claim cards from   plans the      means)           experiment)      refuted?
-                             text + figures)    experiment)                                       inconclusive?)
+  Scouts ──▶ Clustering ──▶ Multimodal Reader ──▶ OpenAI PI ──▶ Eval Harness ──▶ E2B Runner ──▶ Evidence Critic ──▶ Report / Telegram
+ (arXiv,                    (OpenAI —           (strategic     (defines what    (bounded         (truth gate:
+  GitHub)                    claim cards from    orchestrator:  "improved"       sandbox          reproduced?
+                             text + figures)     plans the      means)           experiment)      refuted?
+                                                 experiment)                                       inconclusive?)
 ```
 
 | Stage | Module | What it does |
 | --- | --- | --- |
 | **Scouts** | `sources.py` | Pull fresh candidate claims from arXiv and GitHub, dedupe against what's been seen. |
 | **Clustering** | `clustering.py` | Group related sources into topic clusters so the PI can prioritize. |
-| **Multimodal Reader** | `multimodal_reader.py` | A Gemma reader swarm (via Cerebras) turns a paper/repo into structured **claim cards**: the main claim, figures/charts, benchmark numbers, and runnable code hooks. |
-| **Gemini PI** | `gemini_pi.py` | The "Principal Investigator." Turns mission + context into a decision: search plan, cluster priorities, an experiment proposal, and whether to notify. Rejects weak claims instead of inventing experiments for them. |
+| **Multimodal Reader** | `multimodal_reader.py` | OpenAI turns a paper/repo into structured **claim cards**: the main claim, figures/charts, benchmark numbers, and runnable code hooks. |
+| **OpenAI PI** | `openai_pi.py` | The "Principal Investigator." Turns mission + context into a decision: search plan, cluster priorities, an experiment proposal, and whether to notify. Rejects weak claims instead of inventing experiments for them. |
 | **Eval Harness** | `eval_harness.py` | The local truth contract for "improved" — metric, direction, threshold, baseline vs. candidate commands. Supports absolute deltas (`delta>=5`) and ratios (`candidate >= baseline * 1.10`). |
 | **E2B Runner** | `e2b_runner.py` | Runs setup/baseline/candidate commands in a bounded E2B sandbox, captures logs, parses metric JSON, and downloads declared artifacts. Rejects unbounded shell control tokens. |
 | **Evidence Critic** | `evidence_critic.py` | The gate before anything is reported. Only `reproduced` results with no blocking objections and enough confidence become `reportable`. Worse candidates are `refuted`; below-threshold nulls are `inconclusive`; flaky timeouts trigger `rerun_needed`. |
@@ -90,35 +90,31 @@ extras and set the relevant keys — each capability is independent, so you can
 enable just the ones you want.
 
 ```bash
-pip install -e ".[gemini,e2b,figures]"
+pip install -e ".[e2b,figures]"
 ```
 
 | Variable | Powers | Used by |
 | --- | --- | --- |
-| `CEREBRAS_API_KEY` | Live Gemma multimodal reader swarm | `multimodal_reader.py` |
-| `GEMINI_API_KEY` | Live PI: search plans & experiment proposals | `gemini_pi.py` |
+| `OPENAI_API_KEY` | Live OpenAI reader + PI | `multimodal_reader.py`, `openai_pi.py` |
 | `E2B_API_KEY` | Live sandboxed experiments | `e2b_runner.py` |
 | `TELEGRAM_BOT_TOKEN` | Sending/answering Telegram messages | `telegram.py` |
 | `TELEGRAM_CHAT_ID` | Default ping target (optional) | `telegram.py` |
 
-The live multimodal reader follows Cerebras image-input constraints: model
-`gemma-4-31b`, local figures sent as base64 `image_url` content, PNG/JPEG only,
-max 5 images and 10 MB per request, strict JSON-schema output. For batch reads,
+The live multimodal reader uses OpenAI structured JSON output with model
+`gpt-4o-mini`, local figures sent as base64 `image_url` content, PNG/JPEG only,
+max 5 images and 10 MB per request. For batch reads,
 prefer `read_sources(..., client_factory=...)` so each worker gets its own client.
 
-### Telegram bot
+### Telegram bot (lab assistant)
 
-LabClaw can talk to you both directions on Telegram — pings out, commands in.
-
-1. Message [@BotFather](https://t.me/BotFather), run `/newbot`, copy the token.
-2. Send your new bot any message so it has a chat to reply to.
-3. Export credentials and start the bot:
+LabClaw can verify claims you send it — arXiv links, file paths, or pasted text.
 
 ```bash
 export TELEGRAM_BOT_TOKEN=123456:abc...
-export TELEGRAM_CHAT_ID=987654321   # optional
-python -m labclaw.telegram          # or: labclaw-bot
+python -m labclaw.telegram
 ```
+
+Commands: `/verify <arxiv-url|path|claim>`, `/read <path>`, `/ping`
 
 Built-in commands: `/start`, `/help`, `/ping`, `/whoami`, `/read [--local] <path>`.
 Register your own with `CommandRouter.register`. Send a one-off ping without
