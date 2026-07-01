@@ -14,7 +14,9 @@ from uuid import uuid4
 
 from labclaw.clustering import ClusterStore
 from labclaw.demo_bench import BENCH_SCRIPT
-from labclaw.eval_harness import ExperimentSpec, default_registry
+from labclaw.openai_client import live_openai_enabled
+from labclaw.openai_pi import OpenAIPI
+from labclaw.eval_harness import ExperimentSpec, default_registry, spec_from_pi_proposal
 from labclaw.evidence_critic import EvidenceCritic, EvidenceInput, ReproducibilityContext
 from labclaw.ledger import DEFAULT_MISSION
 from labclaw.multimodal_reader import (
@@ -41,11 +43,7 @@ SAMPLE_SOURCE = Path(__file__).resolve().parent.parent / "samples" / "tiny-ml-cl
 
 
 def live_reader_enabled() -> bool:
-    return bool(os.environ.get("CEREBRAS_API_KEY")) and os.environ.get("LABCLAW_LIVE_READER", "1") not in {
-        "0",
-        "false",
-        "False",
-    }
+    return live_openai_enabled()
 
 
 def live_e2b_enabled() -> bool:
@@ -60,7 +58,7 @@ def demo_capabilities(*, fixture_mode: bool) -> dict[str, bool]:
         "fixture_scouts": fixture_mode,
         "live_reader": live_reader_enabled(),
         "live_e2b": live_e2b_enabled(),
-        "gemini_pi": bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")),
+        "openai_pi": live_openai_enabled(),
     }
 
 
@@ -134,48 +132,190 @@ class PipelineResult:
         }
 
 
+@dataclass
+class PipelineRunState:
+    run_id: str
+    mission: str
+    started_at: str
+    sources: list[SourceRecord] = field(default_factory=list)
+    source: SourceRecord | None = None
+    cluster: Any = None
+    assignment: Any = None
+    reader_result: Any = None
+    claim: Any = None
+    pi_decision: Any = None
+    spec: ExperimentSpec | None = None
+    spec_proof: dict[str, Any] = field(default_factory=dict)
+    metric: Any = None
+    experiment_proof: dict[str, Any] = field(default_factory=dict)
+    verdict: Any = None
+    report: Any = None
+    stages: list[StageSnapshot] = field(default_factory=list)
+    reproduce_journal: dict[str, Any] | None = None
+
+
 class LabPipeline:
     """Runs scout → cluster → read → experiment → eval → report in one heartbeat."""
 
-    def __init__(self, data_dir: Path, *, fixture_mode: bool = True) -> None:
+    def __init__(
+        self,
+        data_dir: Path,
+        *,
+        fixture_mode: bool = True,
+        notify_telegram: bool = False,
+    ) -> None:
         self.data_dir = Path(data_dir)
         self.fixture_mode = fixture_mode
+        self.notify_telegram = notify_telegram
         self.runs_dir = self.data_dir / "runs"
         self.runs_dir.mkdir(parents=True, exist_ok=True)
+        self._active: PipelineRunState | None = None
 
-    def run(self, *, mission: str = DEFAULT_MISSION) -> PipelineResult:
-        run_id = f"run-{uuid4().hex[:8]}"
-        started_at = utc_now()
-        stages: list[StageSnapshot] = []
+    def run(self, *, mission: str = DEFAULT_MISSION, source: SourceRecord | None = None) -> PipelineResult:
+        state = PipelineRunState(
+            run_id=f"run-{uuid4().hex[:8]}",
+            mission=mission,
+            started_at=utc_now(),
+        )
+        if source is not None:
+            state.sources = [source]
+        self._active = state
+        for stage in ("scout", "cluster", "read", "experiment", "eval", "report"):
+            self.run_stage(stage)
+        return self._finalize(state)
 
-        sources, scout_summary, scout_proof = self._stage_scout()
-        stages.append(
+    def verify(self, raw_input: str, *, mission: str = DEFAULT_MISSION) -> PipelineResult:
+        from labclaw.reproduce_loop import run_reproduce_loop
+        from labclaw.verify import resolve_input
+
+        source = resolve_input(raw_input)
+        result = self.run(mission=mission, source=source)
+        try:
+            baseline, candidate, _ = parse_tok_s_benchmarks(
+                result.claim,
+                source_text=source.raw_text or "",
+            )
+            journal = run_reproduce_loop(
+                claim_id=str(result.claim.get("id", "claim-1")),
+                baseline=baseline,
+                candidate=candidate,
+            )
+            payload = result.to_dict()
+            payload["reproduce_journal"] = journal.to_dict()
+            self._persist_payload(result.run_id, payload)
+        except ValueError:
+            pass
+        return result
+
+    def run_stage(self, stage: str) -> None:
+        state = self._require_state()
+        if stage == "scout":
+            self._stage_scout_run(state)
+        elif stage == "cluster":
+            self._stage_cluster_run(state)
+        elif stage == "read":
+            self._stage_read_run(state)
+        elif stage == "experiment":
+            self._stage_experiment_run(state)
+        elif stage == "eval":
+            self._stage_eval_run(state)
+        elif stage == "report":
+            self._stage_report_run(state)
+        else:
+            raise ValueError(f"Unknown pipeline stage: {stage}")
+
+    def _require_state(self) -> PipelineRunState:
+        if self._active is None:
+            raise RuntimeError("No active pipeline run; call run() or build_stage_handlers() first.")
+        return self._active
+
+    def _finalize(self, state: PipelineRunState) -> PipelineResult:
+        source = state.source
+        cluster = state.cluster
+        claim = state.claim
+        spec = state.spec
+        metric = state.metric
+        verdict = state.verdict
+        report = state.report
+        read_proof = next((s.payload.get("proof", {}) for s in state.stages if s.stage == "read"), {})
+        scout_proof = next((s.payload.get("proof", {}) for s in state.stages if s.stage == "scout"), {})
+        experiment_proof = state.experiment_proof
+        result = PipelineResult(
+            run_id=state.run_id,
+            mission=state.mission,
+            stages=state.stages,
+            source=source.to_dict() if isinstance(source, SourceRecord) else dict(source or {}),
+            cluster=cluster.to_dict() if cluster is not None else {},
+            claim=asdict(claim) if hasattr(claim, "__dataclass_fields__") else dict(claim or {}),
+            experiment_spec=spec.to_dict() if spec is not None else {},
+            metric_result=metric.to_dict() if metric is not None else {},
+            critic_verdict=verdict.to_dict() if verdict is not None else {},
+            report=report.to_dict() if report is not None else {},
+            reportable=bool(getattr(verdict, "reportable", False)),
+            demo_proof={
+                "started_at": state.started_at,
+                "finished_at": utc_now(),
+                "live_openai_used": read_proof.get("mode") == "live_openai",
+                "live_cerebras_used": read_proof.get("mode") == "live_openai",
+                "live_e2b_used": experiment_proof.get("mode") == "live_e2b",
+                "live_scouts_used": scout_proof.get("mode") in {"live_network", "live_network_refresh"},
+                "reader_proof": read_proof,
+                "experiment_proof": experiment_proof,
+                "scout_proof": scout_proof,
+                "selected_source_id": getattr(source, "source_id", None),
+                "transparency": {
+                    "scout": scout_proof.get("label", "unknown"),
+                    "reader": read_proof.get("label", "unknown"),
+                    "experiment": experiment_proof.get("label", "unknown"),
+                    "eval": "Evidence critic gates reportable output",
+                },
+            },
+        )
+        payload = result.to_dict()
+        payload["capabilities"] = demo_capabilities(fixture_mode=self.fixture_mode)
+        if state.pi_decision is not None:
+            payload["pi_decision"] = state.pi_decision.to_dict()
+        self._persist_payload(result.run_id, payload)
+        self._active = None
+        return result
+
+    def _stage_scout_run(self, state: PipelineRunState) -> None:
+        if state.sources:
+            proof = {"mode": "user_input", "label": "User-supplied source", "count": len(state.sources)}
+            summary = f"User source · {state.sources[0].source_id}"
+        else:
+            state.sources, summary, proof = self._stage_scout()
+        state.source = self._pick_source(state.sources)
+        state.stages.append(
             StageSnapshot(
                 "scout",
                 "succeeded",
-                scout_summary,
+                summary,
                 {
-                    "count": len(sources),
-                    "proof": scout_proof,
-                    "sources": [source.to_dict() for source in sources],
+                    "count": len(state.sources),
+                    "proof": proof,
+                    "sources": [source.to_dict() for source in state.sources],
+                    "selected_source_id": state.source.source_id,
                 },
             )
         )
 
-        source = self._pick_source(sources)
+    def _stage_cluster_run(self, state: PipelineRunState) -> None:
         cluster_store = ClusterStore(self.data_dir / "clusters.json")
-        assignment = cluster_store.assign(source)
+        state.assignment = cluster_store.assign(state.source)
         cluster_store.save()
-        cluster = cluster_store.clusters[assignment.cluster_id]
-        stages.append(
+        state.cluster = cluster_store.clusters[state.assignment.cluster_id]
+        state.stages.append(
             StageSnapshot(
                 "cluster",
                 "succeeded",
-                f"Assigned to {cluster.topic_name}",
-                {"assignment": asdict(assignment), "cluster": cluster.to_dict()},
+                f"Assigned to {state.cluster.topic_name}",
+                {"assignment": asdict(state.assignment), "cluster": state.cluster.to_dict()},
             )
         )
 
+    def _stage_read_run(self, state: PipelineRunState) -> None:
+        source = state.source
         reader_result, read_summary, read_proof = self._stage_read(source)
         claim = self._pick_claim(reader_result)
         try:
@@ -185,25 +325,41 @@ class LabPipeline:
                 raise
             source = self._sample_source_record()
             source.metadata["curated_demo_source"] = True
-            source.metadata["reason"] = "Live source lacked explicit tok/s benchmarks after Cerebras read"
+            source.metadata["reason"] = "Live source lacked explicit tok/s benchmarks after OpenAI read"
+            state.source = source
             reader_result, read_summary, read_proof = self._stage_read(source)
             read_summary = f"{read_summary} · curated demo claim source"
             claim = self._pick_claim(reader_result)
+        state.reader_result = reader_result
+        state.claim = claim
         read_payload = reader_to_dict(reader_result)
         read_payload["proof"] = read_proof
-        stages.append(StageSnapshot("read", "succeeded", read_summary, read_payload))
+        state.stages.append(StageSnapshot("read", "succeeded", read_summary, read_payload))
 
-        spec, spec_proof = self._build_experiment_spec(claim, assignment.cluster_id, source)
-        metric, experiment_summary, experiment_proof = self._stage_experiment(spec, spec_proof)
-        stages.append(
+    def _stage_experiment_run(self, state: PipelineRunState) -> None:
+        state.pi_decision = self._maybe_pi_decision(state)
+        state.spec, state.spec_proof = self._build_experiment_spec(
+            state.claim,
+            state.assignment.cluster_id,
+            state.source,
+            pi_decision=state.pi_decision,
+        )
+        metric, experiment_summary, experiment_proof = self._stage_experiment(state.spec, state.spec_proof)
+        state.metric = metric
+        state.experiment_proof = experiment_proof
+        state.stages.append(
             StageSnapshot(
                 "experiment",
                 "succeeded" if metric.status != "failed" else "failed",
                 experiment_summary,
-                {"spec": spec.to_dict(), "proof": experiment_proof},
+                {"spec": state.spec.to_dict(), "proof": experiment_proof, "pi": getattr(state.pi_decision, "to_dict", lambda: {})()},
             )
         )
-        stages.append(
+
+    def _stage_eval_run(self, state: PipelineRunState) -> None:
+        metric = state.metric
+        spec = state.spec
+        state.stages.append(
             StageSnapshot(
                 "eval",
                 "succeeded" if metric.status != "failed" else "failed",
@@ -212,6 +368,9 @@ class LabPipeline:
             )
         )
 
+    def _stage_report_run(self, state: PipelineRunState) -> None:
+        spec = state.spec
+        metric = state.metric
         critic = EvidenceCritic(require_artifacts=False)
         plot_path = self.data_dir / "plot.png"
         plot_path.write_bytes(b"demo-plot")
@@ -241,18 +400,20 @@ class LabPipeline:
                     "/workspace/metrics.json": str(metrics_path),
                     "/workspace/plot.png": str(plot_path),
                 },
-                reproducibility=ReproducibilityContext(random_seed=hash(run_id) % 1_000_000, sample_size=128),
+                reproducibility=ReproducibilityContext(random_seed=hash(state.run_id) % 1_000_000, sample_size=128),
             )
         )
         report = build_report(
-            run_id=run_id,
-            cluster_topic=cluster.topic_name,
-            source=source.to_dict() if isinstance(source, SourceRecord) else dict(source),
-            claim=asdict(claim) if hasattr(claim, "__dataclass_fields__") else dict(claim),
+            run_id=state.run_id,
+            cluster_topic=state.cluster.topic_name,
+            source=state.source.to_dict(),
+            claim=asdict(state.claim) if hasattr(state.claim, "__dataclass_fields__") else dict(state.claim),
             metric_result=metric.to_dict(),
             critic_verdict=verdict.to_dict(),
         )
-        stages.append(
+        state.verdict = verdict
+        state.report = report
+        state.stages.append(
             StageSnapshot(
                 "report",
                 "succeeded",
@@ -260,41 +421,36 @@ class LabPipeline:
                 {"report": report.to_dict(), "markdown": report.to_markdown()},
             )
         )
+        if self.notify_telegram and verdict.reportable:
+            self._send_telegram(report)
 
-        result = PipelineResult(
-            run_id=run_id,
-            mission=mission,
-            stages=stages,
-            source=source.to_dict() if isinstance(source, SourceRecord) else dict(source),
-            cluster=cluster.to_dict(),
-            claim=asdict(claim) if hasattr(claim, "__dataclass_fields__") else dict(claim),
-            experiment_spec=spec.to_dict(),
-            metric_result=metric.to_dict(),
-            critic_verdict=verdict.to_dict(),
-            report=report.to_dict(),
-            reportable=verdict.reportable,
-            demo_proof={
-                "started_at": started_at,
-                "finished_at": utc_now(),
-                "live_cerebras_used": read_proof.get("mode") == "live_cerebras",
-                "live_e2b_used": experiment_proof.get("mode") == "live_e2b",
-                "live_scouts_used": scout_proof.get("mode") in {"live_network", "live_network_refresh"},
-                "reader_proof": read_proof,
-                "experiment_proof": experiment_proof,
-                "scout_proof": scout_proof,
-                "selected_source_id": source.source_id,
-                "transparency": {
-                    "scout": scout_proof.get("label", "unknown"),
-                    "reader": read_proof.get("label", "unknown"),
-                    "experiment": experiment_proof.get("label", "unknown"),
-                    "eval": "Evidence critic gates reportable output",
-                },
-            },
-        )
-        payload = result.to_dict()
-        payload["capabilities"] = demo_capabilities(fixture_mode=self.fixture_mode)
-        self._persist_payload(result.run_id, payload)
-        return result
+    def _maybe_pi_decision(self, state: PipelineRunState):
+        if not live_openai_enabled():
+            return None
+        try:
+            from labclaw.openai_client import OpenAIClient
+
+            pi = OpenAIPI(OpenAIClient())
+            claim_cards = [asdict(state.claim) if hasattr(state.claim, "__dataclass_fields__") else dict(state.claim)]
+            return pi.decide(
+                mission=state.mission,
+                cluster_memory=[state.cluster.to_dict()],
+                source_summaries=[state.source.to_dict()],
+                claim_cards=claim_cards,
+                experiment_results=[],
+            )
+        except Exception:
+            return None
+
+    def _send_telegram(self, report) -> None:
+        try:
+            from labclaw.telegram import notify
+
+            ping = report.telegram_ping()
+            if ping:
+                notify(ping)
+        except Exception:
+            return
 
     def latest(self) -> dict[str, Any] | None:
         runs = sorted(self.runs_dir.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
@@ -429,22 +585,22 @@ class LabPipeline:
         started = time.perf_counter()
         if live_reader_enabled():
             try:
-                reader_result = read_source_record(self._to_reader_record(source), use_gemma=True)
+                reader_result = read_source_record(self._to_reader_record(source), use_llm=True)
                 duration_ms = round((time.perf_counter() - started) * 1000)
                 proof = {
-                    "mode": "live_cerebras",
-                    "label": f"LIVE Cerebras {MODEL} on scouted source",
-                    "provider": "cerebras",
+                    "mode": "live_openai",
+                    "label": f"LIVE OpenAI {MODEL} on scouted source",
+                    "provider": "openai",
                     "model": MODEL,
                     "duration_ms": duration_ms,
                     "source_id": source.source_id,
                     "source_title": source.title,
-                    "api_key_suffix": key_suffix("CEREBRAS_API_KEY"),
+                    "api_key_suffix": key_suffix("OPENAI_API_KEY"),
                     "strict_json_schema": True,
                     "cards_extracted": len(reader_result.cards),
                 }
                 summary = (
-                    f"LIVE Cerebras · {MODEL} · {duration_ms}ms · "
+                    f"LIVE OpenAI · {MODEL} · {duration_ms}ms · "
                     f"{len(reader_result.cards)} claim card(s) from {source.source_id}"
                 )
                 return reader_result, summary, proof
@@ -452,7 +608,7 @@ class LabPipeline:
                 reader_result = parse_local_fixture(source.raw_text or "", source_path=None)
                 proof = {
                     "mode": "fixture_fallback",
-                    "label": "Fixture parser fallback after Cerebras error",
+                    "label": "Fixture parser fallback after OpenAI error",
                     "error": str(exc),
                     "duration_ms": round((time.perf_counter() - started) * 1000),
                 }
@@ -461,7 +617,7 @@ class LabPipeline:
         reader_result = parse_local_fixture(source.raw_text or "", source_path=None)
         proof = {
             "mode": "fixture",
-            "label": "Offline fixture parser (no CEREBRAS_API_KEY)",
+            "label": "Offline fixture parser (no OPENAI_API_KEY)",
             "duration_ms": round((time.perf_counter() - started) * 1000),
         }
         return reader_result, f"Fixture reader · {len(reader_result.cards)} claim card(s)", proof
@@ -492,7 +648,7 @@ class LabPipeline:
         proof = {
             **spec_proof,
             "mode": "local_harness",
-            "label": "Local metric harness using Cerebras-extracted benchmark targets",
+            "label": "Local metric harness using OpenAI-extracted benchmark targets",
         }
         return metric, f"Local harness · {metric.baseline} → {metric.candidate} tok/s", proof
 
@@ -533,7 +689,28 @@ class LabPipeline:
             return reader_result.cards[0]
         raise ValueError("Reader produced no claim cards.")
 
-    def _build_experiment_spec(self, claim, cluster_id: str, source: SourceRecord) -> tuple[ExperimentSpec, dict[str, Any]]:
+    def _build_experiment_spec(
+        self,
+        claim,
+        cluster_id: str,
+        source: SourceRecord,
+        *,
+        pi_decision=None,
+    ) -> tuple[ExperimentSpec, dict[str, Any]]:
+        if pi_decision is not None and pi_decision.experiment_proposal.should_run:
+            try:
+                proposal = asdict(pi_decision.experiment_proposal)
+                spec = spec_from_pi_proposal(proposal, harness="tiny_metric" if not live_e2b_enabled() else "e2b")
+                proof = {
+                    "source": "openai_pi",
+                    "baseline_command": spec.baseline_command,
+                    "candidate_command": spec.candidate_command,
+                    "threshold": spec.threshold,
+                    "harness": spec.harness,
+                }
+                return spec, proof
+            except ValueError:
+                pass
         baseline_target, candidate_target, raw_numbers = parse_tok_s_benchmarks(
             claim,
             source_text=source.raw_text or "",
@@ -578,45 +755,43 @@ class LabPipeline:
         return spec, proof
 
 
-def build_stage_handlers(pipeline: LabPipeline, *, mission: str = DEFAULT_MISSION):
-    """Return daemon stage handlers that execute the integrated pipeline once."""
+def build_stage_handlers(
+    pipeline: LabPipeline,
+    *,
+    mission: str = DEFAULT_MISSION,
+    ledger_run_id: str | None = None,
+):
+    """Return daemon stage handlers wired to the integrated pipeline."""
 
-    state: dict[str, Any] = {"result": None}
+    state_holder: dict[str, Any] = {"run_id": ledger_run_id}
 
-    def scout_handler(run_id: str) -> None:
-        state["pending"] = pipeline
+    def ensure_run(run_id: str) -> PipelineRunState:
+        if pipeline._active is None:
+            pipeline._active = PipelineRunState(
+                run_id=run_id,
+                mission=mission,
+                started_at=utc_now(),
+            )
+        return pipeline._active
 
-    def cluster_handler(run_id: str) -> None:
-        return None
+    def make_handler(stage: str):
+        def handler(run_id: str) -> None:
+            ensure_run(run_id)
+            pipeline.run_stage(stage)
 
-    def read_handler(run_id: str) -> None:
-        return None
-
-    def experiment_handler(run_id: str) -> None:
-        return None
-
-    def eval_handler(run_id: str) -> None:
-        return None
+        return handler
 
     def report_handler(run_id: str) -> None:
-        if state.get("result") is None:
-            state["result"] = pipeline.run(mission=mission)
-        return None
-
-    # Run the full pipeline on first stage; later stages are ledger markers only.
-    def integrated_handler(run_id: str) -> None:
-        if state.get("result") is None:
-            state["result"] = pipeline.run(mission=mission)
+        active = ensure_run(run_id)
+        pipeline.run_stage("report")
+        result = pipeline._finalize(active)
+        state_holder["result"] = result
 
     return {
-        "scout": integrated_handler,
-        "cluster": noop_pass,
-        "read": noop_pass,
-        "experiment": noop_pass,
-        "eval": noop_pass,
-        "report": noop_pass,
+        "scout": make_handler("scout"),
+        "cluster": make_handler("cluster"),
+        "read": make_handler("read"),
+        "experiment": make_handler("experiment"),
+        "eval": make_handler("eval"),
+        "report": report_handler,
     }
-
-
-def noop_pass(_run_id: str) -> None:
-    return None

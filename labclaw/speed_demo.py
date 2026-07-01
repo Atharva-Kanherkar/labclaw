@@ -1,4 +1,4 @@
-"""Cerebras reader swarm speed demo."""
+"""OpenAI reader swarm speed demo."""
 
 from __future__ import annotations
 
@@ -78,9 +78,12 @@ def run_speed_demo(
     *,
     fast_workers: int = 4,
     baseline_delay_ms: float = 150,
-    live_cerebras: bool = False,
+    live_openai: bool = False,
+    live_cerebras: bool | None = None,
     progress: Callable[[ProgressEvent], None] | None = None,
 ) -> SpeedDemoReport:
+    if live_cerebras is not None:
+        live_openai = live_cerebras
     progress_events: list[ProgressEvent] = []
 
     def emit(event: ProgressEvent) -> None:
@@ -92,7 +95,7 @@ def run_speed_demo(
     fast_results, fast_summary = run_fast_lane(
         sources,
         max_workers=fast_workers,
-        live_cerebras=live_cerebras,
+        live_openai=live_openai,
         emit=emit,
     )
     baseline_results, baseline_summary = run_baseline_lane(
@@ -113,14 +116,14 @@ def run_fast_lane(
     sources: Sequence[ReaderSource],
     *,
     max_workers: int,
-    live_cerebras: bool,
+    live_openai: bool,
     emit: Callable[[ProgressEvent], None],
 ) -> tuple[list[ReaderSourceResult], LaneSummary]:
-    lane = "cerebras-gemma-swarm" if live_cerebras else "fixture-reader-swarm"
-    provider = "cerebras/gemma-4-31b" if live_cerebras else "fixture-parser"
+    lane = "openai-reader-swarm" if live_openai else "fixture-reader-swarm"
+    provider = "openai/gpt-4o-mini" if live_openai else "fixture-parser"
     started = time.perf_counter()
     emit(ProgressEvent("lane_started", lane, None, f"started {provider} reader swarm", 0.0))
-    results = read_sources(sources, max_workers=max_workers, use_gemma=live_cerebras)
+    results = read_sources(sources, max_workers=max_workers, use_llm=live_openai)
     elapsed_ms = (time.perf_counter() - started) * 1000
     for result in results:
         emit(
@@ -139,7 +142,7 @@ def run_fast_lane(
         sources=sources,
         results=results,
         elapsed_ms=elapsed_ms,
-        simulated=not live_cerebras,
+        simulated=not live_openai,
     )
     emit(ProgressEvent("lane_finished", lane, None, f"finished {provider} reader swarm", elapsed_ms))
     return results, summary
@@ -160,7 +163,7 @@ def run_baseline_lane(
         try:
             if delay_ms > 0:
                 time.sleep(delay_ms / 1000)
-            result = read_source_input(source, use_gemma=False, client=None)
+            result = read_source_input(source, use_llm=False, client=None)
         except Exception as exc:  # noqa: BLE001 - demo baseline should keep reporting.
             elapsed = (time.perf_counter() - source_started) * 1000
             source_result = ReaderSourceResult(
@@ -297,12 +300,13 @@ def report_to_dict(report: SpeedDemoReport) -> dict[str, Any]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the LabClaw Cerebras reader swarm speed demo.")
+    parser = argparse.ArgumentParser(description="Run the LabClaw OpenAI reader swarm speed demo.")
     parser.add_argument("sources", type=Path, nargs="+", help="Markdown fixture sources to read.")
     parser.add_argument("--repeat", type=int, default=1, help="Repeat fixture sources to form a batch.")
     parser.add_argument("--fast-workers", type=int, default=4, help="Reader swarm concurrency.")
     parser.add_argument("--baseline-delay-ms", type=float, default=150, help="Delay per baseline source.")
-    parser.add_argument("--live-cerebras", action="store_true", help="Use live Cerebras/Gemma instead of fixture parsing.")
+    parser.add_argument("--live-openai", action="store_true", help="Use live OpenAI instead of fixture parsing.")
+    parser.add_argument("--live-cerebras", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--json", action="store_true", help="Print machine-readable report JSON.")
     parser.add_argument("--progress-jsonl", action="store_true", help="Print progress events as JSON lines before the report.")
     args = parser.parse_args()
@@ -312,7 +316,7 @@ def main() -> None:
         sources,
         fast_workers=args.fast_workers,
         baseline_delay_ms=args.baseline_delay_ms,
-        live_cerebras=args.live_cerebras,
+        live_openai=args.live_openai or args.live_cerebras,
     )
     if args.progress_jsonl:
         print(progress_json_lines(report.progress_events))

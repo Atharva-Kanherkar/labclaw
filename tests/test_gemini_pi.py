@@ -169,30 +169,52 @@ def test_gemini_pi_rejects_malformed_json() -> None:
 
 
 def test_gemini_client_requires_api_key_for_live_use(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
-    with pytest.raises(RuntimeError, match="GEMINI_API_KEY"):
+    with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
         GeminiAPIClient()
 
 
-class FakeModels:
+class FakeCompletions:
     def __init__(self) -> None:
         self.calls = []
 
-    def generate_content(self, *, model, contents, config):
-        self.calls.append({"model": model, "contents": contents, "config": config})
-        return type("Response", (), {"text": json.dumps(sample_decision())})()
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return type(
+            "Response",
+            (),
+            {
+                "choices": [
+                    type(
+                        "Choice",
+                        (),
+                        {
+                            "message": type(
+                                "Message",
+                                (),
+                                {"content": json.dumps(sample_decision())},
+                            )()
+                        },
+                    )()
+                ]
+            },
+        )()
 
 
-class FakeGenAIClient:
+class FakeChat:
     def __init__(self) -> None:
-        self.models = FakeModels()
+        self.completions = FakeCompletions()
+
+
+class FakeOpenAIClient:
+    def __init__(self) -> None:
+        self.chat = FakeChat()
 
 
 def test_gemini_api_client_uses_response_schema_and_system_instruction() -> None:
-    fake_genai = FakeGenAIClient()
-    client = GeminiAPIClient(genai_client=fake_genai)
+    fake_openai = FakeOpenAIClient()
+    client = GeminiAPIClient(openai_client=fake_openai)
     messages = build_pi_messages(
         PIInputs(
             mission="Track measurable code claims.",
@@ -203,13 +225,10 @@ def test_gemini_api_client_uses_response_schema_and_system_instruction() -> None
         )
     )
 
-    raw = client.complete_json(messages=messages, schema={"type": "object"}, model=DEFAULT_PI_MODEL)
+    raw = client.complete_json(messages=messages, schema={"title": "pi_decision", "type": "object"}, model=DEFAULT_PI_MODEL)
 
-    call = fake_genai.models.calls[0]
+    call = fake_openai.chat.completions.calls[0]
     assert json.loads(raw)["schema_version"] == PI_SCHEMA_VERSION
     assert call["model"] == DEFAULT_PI_MODEL
-    assert call["contents"] == messages[1]["content"]
-    assert call["config"]["system_instruction"] == messages[0]["content"]
-    assert call["config"]["response_mime_type"] == "application/json"
-    assert call["config"]["response_schema"] == {"type": "object"}
-    assert "response_json_schema" not in call["config"]
+    assert call["messages"][0]["role"] == "system"
+    assert call["response_format"]["type"] == "json_schema"

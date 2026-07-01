@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Callable
 
 from labclaw.ledger import DEFAULT_MISSION, DEFAULT_STAGES, JsonlRunLedger, RunLedger, StageRun
+from labclaw.pipeline import LabPipeline, build_stage_handlers
 
 StageHandler = Callable[[str], None]
 
@@ -88,6 +89,9 @@ def main(argv: list[str] | None = None) -> None:
         default=Path(".labclaw") / "run-ledger.jsonl",
         help="Path to the local JSONL run ledger.",
     )
+    parser.add_argument("--data-dir", type=Path, default=Path("labclaw_data"), help="Pipeline state directory.")
+    parser.add_argument("--live", action="store_true", help="Use live scouts/readers instead of fixtures.")
+    parser.add_argument("--notify", action="store_true", help="Send Telegram ping when a report is reportable.")
     parser.add_argument("--mission", help="Standing ML mission text.")
     parser.add_argument("--mission-file", type=Path, help="Read standing mission text from a file.")
     parser.add_argument("--json", action="store_true", help="Print JSON output.")
@@ -107,12 +111,20 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(2)
 
     ledger = JsonlRunLedger(args.ledger)
-    daemon = HeartbeatDaemon(ledger)
     mission = DEFAULT_MISSION
     if args.resume and mission_supplied:
         print("Warning: --mission and --mission-file are ignored when resuming a run.", file=sys.stderr)
     if not args.resume:
         mission = load_mission(args.mission_file, args.mission or DEFAULT_MISSION)
+
+    pipeline = LabPipeline(
+        args.data_dir,
+        fixture_mode=not args.live,
+        notify_telegram=args.notify,
+    )
+    handlers = build_stage_handlers(pipeline, mission=mission)
+    daemon = HeartbeatDaemon(ledger, handlers=handlers)
+
     try:
         run_id = daemon.run_once(mission=mission, resume=args.resume)
     except Exception as exc:

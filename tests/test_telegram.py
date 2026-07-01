@@ -168,7 +168,7 @@ def test_parse_read_args_flag_anywhere():
 
 def test_bot_read_local_runs_offline(tmp_path, monkeypatch):
     # Key is set, but --local must force the offline parser (no SDK call).
-    monkeypatch.setenv("CEREBRAS_API_KEY", "x")
+    monkeypatch.setenv("OPENAI_API_KEY", "x")
     source = tmp_path / "claim.md"
     source.write_text("# Demo\nThe claim is a 2x speedup.\n", encoding="utf-8")
     client, transport = make_client()

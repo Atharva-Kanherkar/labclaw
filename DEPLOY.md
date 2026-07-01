@@ -18,8 +18,7 @@ Required deploy env:
 
 | Key | Used by | When |
 | --- | --- | --- |
-| `CEREBRAS_API_KEY` | Gemma reader swarm | Live multimodal claim extraction |
-| `GEMINI_API_KEY` | Gemini PI | Live search plans / experiment proposals |
+| `OPENAI_API_KEY` | OpenAI reader + PI | Live multimodal claim extraction and experiment planning |
 | `E2B_API_KEY` | E2B runner | Live sandbox experiments |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot | Sending pings |
 | `TELEGRAM_CHAT_ID` | Telegram bot | Default chat target |

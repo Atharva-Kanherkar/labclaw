@@ -50,6 +50,21 @@ def _scout(args) -> int:
     return 0
 
 
+def _verify(args) -> int:
+    from labclaw.pipeline import LabPipeline
+    from labclaw.verify import resolve_input
+
+    data_dir = Path(args.data_dir)
+    pipeline = LabPipeline(data_dir, fixture_mode=not args.live)
+    if args.input.startswith("http") or args.input.lower().startswith("arxiv:"):
+        result = pipeline.verify(args.input, mission=args.mission)
+    else:
+        source = resolve_input(args.input)
+        result = pipeline.run(mission=args.mission, source=source)
+    print(json.dumps(result.to_dict(), indent=2))
+    return 0
+
+
 def _daemon(args) -> int:
     daemon_main(getattr(args, "daemon_args", []))
     return 0
@@ -64,6 +79,13 @@ def main(argv=None) -> None:
     p_scout.add_argument("--max", type=int, default=25, help="Max results per scout.")
     p_scout.add_argument("--data-dir", default="labclaw_data", help="Where to store state.")
     p_scout.set_defaults(func=_scout)
+
+    p_verify = sub.add_parser("verify", help="Verify a claim from arXiv URL, file, or text.")
+    p_verify.add_argument("input", help="arXiv URL, file path, or claim text.")
+    p_verify.add_argument("--live", action="store_true", help="Use live OpenAI reader/scouts.")
+    p_verify.add_argument("--data-dir", default="labclaw_data", help="Where to store run state.")
+    p_verify.add_argument("--mission", default="Verify this ML/code claim with measured evidence.")
+    p_verify.set_defaults(func=_verify)
 
     p_daemon = sub.add_parser("daemon", help="Run the heartbeat daemon.")
     p_daemon.add_argument("daemon_args", nargs=argparse.REMAINDER, help="Daemon flags such as --once")
